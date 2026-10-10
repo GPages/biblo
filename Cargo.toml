@@ -1,0 +1,12 @@
+[package]
+name = "biblo"
+version = "0.1.0"
+edition = "2021"
+description = "Gestion de bibliothèque scolaire hors-ligne : livres, élèves, prêts, code-barres"
+license = "0BSD"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
