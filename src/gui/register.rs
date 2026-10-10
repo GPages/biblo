@@ -1,16 +1,16 @@
-//! Second view: register books (and print their barcode labels) and pupils.
+//! Second view: register books and pupils, and print their barcodes.
 
 use std::path::Path;
 
-use biblo::codes::{book_code, parse_code_or_number, student_code, Kind, Scanned};
+use biblo::codes::{book_code, student_code, Kind};
 use biblo::dates::{format_date, parse_date, parse_year};
-use biblo::labels::{self, Label};
 use biblo::search::{fold, Query};
 use biblo::{BookInput, Store};
 use eframe::egui::{self, Align, Layout};
 use egui_extras::{Column, TableBuilder};
 
-use super::{barcode, open_file, Message};
+use super::print_queue::PrintQueue;
+use super::Message;
 
 pub struct RegisterView {
     // New book form.
@@ -23,10 +23,7 @@ pub struct RegisterView {
     book_message: Option<Message>,
     focus_title: bool,
 
-    /// Book ids waiting to be printed on the next label sheet.
-    to_print: Vec<u32>,
-    reprint_code: String,
-    labels_message: Option<Message>,
+    book_labels: PrintQueue,
 
     // New pupil form.
     last_name: String,
@@ -34,6 +31,8 @@ pub struct RegisterView {
     birth_date: String,
     student_message: Option<Message>,
     student_query: String,
+
+    student_cards: PrintQueue,
 }
 
 impl Default for RegisterView {
@@ -47,14 +46,13 @@ impl Default for RegisterView {
             copies: 1,
             book_message: None,
             focus_title: false,
-            to_print: Vec::new(),
-            reprint_code: String::new(),
-            labels_message: None,
+            book_labels: PrintQueue::new(Kind::Book),
             last_name: String::new(),
             first_name: String::new(),
             birth_date: String::new(),
             student_message: None,
             student_query: String::new(),
+            student_cards: PrintQueue::new(Kind::Student),
         }
     }
 }
@@ -71,7 +69,7 @@ impl RegisterView {
                         self.book_form(ui, store);
                         ui.add_space(12.0);
                         ui.separator();
-                        self.label_sheet(ui, store, data_dir);
+                        self.book_labels.ui(ui, store.lib(), data_dir);
                     });
                 });
             egui::ScrollArea::vertical()
@@ -79,6 +77,9 @@ impl RegisterView {
                 .show(&mut cols[1], |ui| {
                     ui.with_layout(plain, |ui| {
                         self.student_form(ui, store);
+                        ui.add_space(12.0);
+                        ui.separator();
+                        self.student_cards.ui(ui, store.lib(), data_dir);
                         ui.add_space(12.0);
                         ui.separator();
                         self.student_list(ui, store);
@@ -158,7 +159,7 @@ impl RegisterView {
         match store.apply(|lib| lib.add_copies(input, self.copies)) {
             Err(e) => Message::Err(e.to_string()),
             Ok(ids) => {
-                self.to_print.extend(&ids);
+                self.book_labels.push(ids.iter().copied());
                 for field in [
                     &mut self.title,
                     &mut self.author,
@@ -181,135 +182,6 @@ impl RegisterView {
                 }
             }
         }
-    }
-
-    fn label_sheet(&mut self, ui: &mut egui::Ui, store: &Store, data_dir: &Path) {
-        let lib = store.lib();
-        ui.heading(format!("Étiquettes à imprimer ({})", self.to_print.len()));
-        ui.add_space(4.0);
-        ui.label("Les livres enregistrés s'ajoutent ici automatiquement.");
-        ui.horizontal(|ui| {
-            ui.label("Réimprimer une étiquette, code du livre :");
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut self.reprint_code)
-                    .hint_text("L000123")
-                    .desired_width(90.0),
-            );
-            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Ajouter").clicked() || entered {
-                self.labels_message = self.add_reprint(store);
-                if entered {
-                    field.request_focus();
-                }
-            }
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let has_labels = !self.to_print.is_empty();
-            if ui
-                .add_enabled(has_labels, egui::Button::new("Créer la feuille PDF"))
-                .clicked()
-            {
-                self.labels_message = Some(self.make_sheet(store, data_dir));
-            }
-            if ui
-                .add_enabled(has_labels, egui::Button::new("Vider la liste"))
-                .clicked()
-            {
-                self.to_print.clear();
-                self.labels_message = None;
-            }
-        });
-        if let Some(m) = &self.labels_message {
-            m.show(ui);
-        }
-        ui.add_space(6.0);
-
-        let mut remove = None;
-        for (i, id) in self.to_print.iter().enumerate() {
-            let Some(book) = lib.book(*id) else { continue };
-            ui.horizontal(|ui| {
-                let code = book_code(book.id);
-                barcode(ui, &code, 2.0, 40.0);
-                ui.vertical(|ui| {
-                    ui.monospace(&code);
-                    ui.label(&book.title);
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("Retirer").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            });
-        }
-        if let Some(i) = remove {
-            self.to_print.remove(i);
-        }
-    }
-
-    fn add_reprint(&mut self, store: &Store) -> Option<Message> {
-        if self.reprint_code.trim().is_empty() {
-            return None;
-        }
-        let message = match parse_code_or_number(&self.reprint_code, Kind::Book) {
-            None => Message::Err(format!(
-                "Code illisible : « {} ».",
-                self.reprint_code.trim()
-            )),
-            Some(Scanned::Student(_)) => {
-                Message::Err("C'est un code d'élève, pas un code de livre.".into())
-            }
-            Some(Scanned::Book(id)) => match store.lib().book(id) {
-                None => Message::Err(format!("Livre introuvable : {}.", book_code(id))),
-                Some(_) if self.to_print.contains(&id) => {
-                    Message::Err(format!("{} est déjà dans la liste.", book_code(id)))
-                }
-                Some(_) => {
-                    self.to_print.push(id);
-                    Message::Ok(format!("{} ajouté à la liste.", book_code(id)))
-                }
-            },
-        };
-        self.reprint_code.clear();
-        Some(message)
-    }
-
-    fn make_sheet(&self, store: &Store, data_dir: &Path) -> Message {
-        let lib = store.lib();
-        let sheet: Vec<Label> = self
-            .to_print
-            .iter()
-            .filter_map(|id| lib.book(*id))
-            .map(|b| Label {
-                code: book_code(b.id),
-                caption: b.title.clone(),
-            })
-            .collect();
-        let pdf = labels::sheet_pdf(&sheet);
-        let dir = data_dir.join("etiquettes");
-        let name = format!(
-            "etiquettes-{}.pdf",
-            chrono::Local::now().format("%Y-%m-%d-%H%M%S")
-        );
-        let path = dir.join(name);
-        let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, pdf));
-        if let Err(e) = written {
-            return Message::Err(format!("Impossible d'écrire le PDF : {e}"));
-        }
-        let pages = sheet.len().div_ceil(labels::LABELS_PER_PAGE);
-        let mut text = format!(
-            "Feuille créée : {} étiquette(s) sur {} page(s).\n{}\n\
-             Imprimez-la en taille réelle (100 %), sans « ajuster à la page ».",
-            sheet.len(),
-            pages,
-            path.display()
-        );
-        if let Err(e) = open_file(&path) {
-            text.push_str(&format!(
-                "\nOuverture automatique impossible ({e}) : ouvrez le fichier à la main."
-            ));
-        }
-        Message::Ok(text)
     }
 
     // --------------------------------------------------------- students
@@ -358,6 +230,7 @@ impl RegisterView {
         match store.apply(|lib| lib.add_student(&last, &first, birth)) {
             Err(e) => Message::Err(e.to_string()),
             Ok(id) => {
+                self.student_cards.push([id]);
                 self.last_name.clear();
                 self.first_name.clear();
                 self.birth_date.clear();
@@ -376,18 +249,8 @@ impl RegisterView {
         let all: Vec<_> = lib.students().iter().filter(|s| !s.archived).collect();
         ui.heading(format!("Élèves inscrits ({})", all.len()));
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label("Rechercher :");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.student_query)
-                    .hint_text("nom, prénom, date, code…")
-                    .desired_width(240.0),
-            );
-        });
-        ui.add_space(4.0);
-
         let query = Query::new(&self.student_query);
-        let mut rows: Vec<(String, [String; 4])> = all
+        let mut rows: Vec<(String, u32, [String; 4])> = all
             .iter()
             .map(|s| {
                 let key = fold(&format!("{}\n{}", s.last_name, s.first_name));
@@ -397,11 +260,31 @@ impl RegisterView {
                     s.first_name.clone(),
                     format_date(s.birth_date),
                 ];
-                (key, cells)
+                (key, s.id, cells)
             })
-            .filter(|(_, cells)| query.matches(&cells.each_ref().map(String::as_str)))
+            .filter(|(_, _, cells)| query.matches(&cells.each_ref().map(String::as_str)))
             .collect();
         rows.sort();
+
+        ui.horizontal(|ui| {
+            ui.label("Rechercher :");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.student_query)
+                    .hint_text("nom, prénom, date, code…")
+                    .desired_width(240.0),
+            );
+            let shown = format!("Ajouter les {} élève(s) affiché(s) aux cartes", rows.len());
+            if ui
+                .add_enabled(!rows.is_empty(), egui::Button::new(shown))
+                .clicked()
+            {
+                let added = self.student_cards.push(rows.iter().map(|(_, id, _)| *id));
+                self.student_cards.set_message(Message::Ok(format!(
+                    "{added} carte(s) ajoutée(s) à la liste."
+                )));
+            }
+        });
+        ui.add_space(4.0);
 
         if rows.is_empty() {
             ui.label(if all.is_empty() {
@@ -428,7 +311,7 @@ impl RegisterView {
             })
             .body(|body| {
                 body.rows(20.0, rows.len(), |mut row| {
-                    let (_, cells) = &rows[row.index()];
+                    let (_, _, cells) = &rows[row.index()];
                     row.col(|ui| {
                         ui.monospace(&cells[0]);
                     });

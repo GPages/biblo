@@ -1,6 +1,7 @@
 //! Window shell: tabs, status bar, and helpers shared by the views.
 
 mod books;
+mod print_queue;
 mod register;
 
 use std::path::{Path, PathBuf};

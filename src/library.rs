@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::search::fold;
 
 pub const CURRENT_VERSION: u32 = 1;
 pub const MIN_YEAR: i32 = 1000;
@@ -17,8 +18,9 @@ fn clean_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Clé de comparaison des noms : sans casse ni accents (« Léa » = « LEA »).
 fn name_key(s: &str) -> String {
-    clean_text(s).to_lowercase()
+    fold(&clean_text(s))
 }
 
 // ---------------------------------------------------------------- Livres
@@ -277,7 +279,8 @@ impl Library {
     }
 
     /// Un élève est identifié par nom + prénom + date de naissance : on refuse
-    /// un doublon parmi les élèves non archivés (sans tenir compte de la casse).
+    /// un doublon parmi les élèves non archivés (sans tenir compte de la casse
+    /// ni des accents).
     fn name_taken(&self, last: &str, first: &str, birth: NaiveDate, except: Option<u32>) -> bool {
         let (l, f) = (name_key(last), name_key(first));
         self.students.iter().any(|s| {
@@ -694,6 +697,21 @@ mod tests {
             lib.add_student("Durand", " ", BIRTH),
             Err(Error::EmptyFirstName)
         );
+    }
+
+    #[test]
+    fn duplicate_check_ignores_accents() {
+        let mut lib = Library::new();
+        lib.add_student("Lefèvre", "Léa", BIRTH).unwrap();
+        assert!(matches!(
+            lib.add_student("LEFEVRE", "Lea", BIRTH),
+            Err(Error::DuplicateStudent { .. })
+        ));
+        assert!(matches!(
+            lib.add_student("lefevre", "léa", BIRTH),
+            Err(Error::DuplicateStudent { .. })
+        ));
+        assert_eq!(lib.students().len(), 1);
     }
 
     #[test]
