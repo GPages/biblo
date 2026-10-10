@@ -1,6 +1,9 @@
 use std::fmt;
 
+use chrono::NaiveDate;
+
 use crate::codes::{book_code, student_code};
+use crate::dates::format_date;
 
 /// Erreurs métier et techniques. Les messages (`Display`) sont en français
 /// et destinés à être affichés tels quels à l'utilisateur.
@@ -23,7 +26,11 @@ pub enum Error {
     BookOnLoan(u32),
     /// Archivage refusé : l'élève a encore des livres.
     StudentHasLoans { student: u32, count: usize },
-    DuplicateStudent { last_name: String, first_name: String },
+    DuplicateStudent {
+        last_name: String,
+        first_name: String,
+        birth_date: NaiveDate,
+    },
     InvalidLoanDates,
     Io(String),
     Json(String),
@@ -66,7 +73,12 @@ impl fmt::Display for Error {
             Error::DuplicateStudent {
                 last_name,
                 first_name,
-            } => write!(f, "Un élève « {last_name} {first_name} » existe déjà."),
+                birth_date,
+            } => write!(
+                f,
+                "Un élève « {last_name} {first_name} » né(e) le {} existe déjà.",
+                format_date(*birth_date)
+            ),
             Error::InvalidLoanDates => write!(
                 f,
                 "Dates incohérentes : le retour ne peut pas précéder l'emprunt."
