@@ -26,6 +26,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Biblo",
         options,
-        Box::new(|_cc| Ok(Box::new(gui::App::new(data_dir())))),
+        Box::new(|cc| Ok(Box::new(gui::App::new(&cc.egui_ctx, data_dir())))),
     )
 }

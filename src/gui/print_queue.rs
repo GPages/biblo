@@ -6,9 +6,9 @@ use biblo::codes::{book_code, parse_code_or_number, student_code, Kind, Scanned}
 use biblo::dates::format_date;
 use biblo::labels::{self, Label};
 use biblo::{Error, Library};
-use eframe::egui::{self, Align, Layout};
+use eframe::egui;
 
-use super::{barcode, open_file, Message};
+use super::{barcode, open_file, theme, Message};
 
 /// The French texts that differ between book labels and pupil cards.
 struct Texts {
@@ -24,7 +24,7 @@ struct Texts {
 fn texts(kind: Kind) -> Texts {
     match kind {
         Kind::Book => Texts {
-            heading: "Étiquettes de livres à imprimer",
+            heading: "🏷 Étiquettes de livres à imprimer",
             auto_added: "Les livres enregistrés s'ajoutent ici automatiquement.",
             field: "Réimprimer une étiquette, code du livre :",
             hint: "L000123",
@@ -33,7 +33,7 @@ fn texts(kind: Kind) -> Texts {
             unit: "étiquette(s)",
         },
         Kind::Student => Texts {
-            heading: "Cartes d'élèves à imprimer",
+            heading: "🎫 Cartes d'élèves à imprimer",
             auto_added: "Les élèves enregistrés s'ajoutent ici automatiquement.",
             field: "Ajouter une carte, code de l'élève :",
             hint: "E000045",
@@ -139,7 +139,10 @@ impl PrintQueue {
         ui.horizontal(|ui| {
             let has_items = !self.ids.is_empty();
             if ui
-                .add_enabled(has_items, egui::Button::new("Créer la feuille PDF"))
+                .add_enabled(
+                    has_items,
+                    theme::main_button("Créer la feuille PDF", theme::BLUE),
+                )
                 .clicked()
             {
                 self.message = Some(self.make_sheet(lib, data_dir));
@@ -169,13 +172,14 @@ impl PrintQueue {
                     ui.horizontal(|ui| {
                         barcode(ui, &label.code, 2.0, 40.0);
                         ui.vertical(|ui| {
-                            ui.monospace(&label.code);
+                            // The button sits next to the code so it never covers the caption.
+                            ui.horizontal(|ui| {
+                                ui.monospace(&label.code);
+                                if ui.small_button("Retirer").clicked() {
+                                    remove = Some(i);
+                                }
+                            });
                             ui.label(&label.caption);
-                        });
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("Retirer").clicked() {
-                                remove = Some(i);
-                            }
                         });
                     });
                 }

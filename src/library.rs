@@ -23,6 +23,24 @@ fn name_key(s: &str) -> String {
     fold(&clean_text(s))
 }
 
+/// Clé de comparaison des titres et auteurs : sans casse, accents ni
+/// ponctuation (« L’Œil du loup ! » = « l'oeil du loup »).
+fn title_key(s: &str) -> String {
+    let letters: String = fold(s)
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    clean_text(&letters)
+}
+
+/// ISBN sans tirets ni espaces.
+fn isbn_key(s: &str) -> String {
+    s.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
 // ---------------------------------------------------------------- Livres
 
 /// Données saisies pour créer ou modifier un livre. Seul le titre est obligatoire.
@@ -58,6 +76,26 @@ impl BookInput {
             year: self.year,
             isbn: clean_text(&self.isbn),
         })
+    }
+
+    /// Nouvel exemplaire de `book` : reprend l'orthographe du titre (et de
+    /// l'auteur s'il est connu) et complète les champs laissés vides.
+    pub fn filled_from(&self, book: &Book) -> BookInput {
+        let mine_or = |mine: &str, theirs: &str| {
+            if mine.trim().is_empty() {
+                theirs.to_string()
+            } else {
+                mine.to_string()
+            }
+        };
+        BookInput {
+            title: book.title.clone(),
+            author: mine_or(&book.author, &self.author),
+            collection: mine_or(&self.collection, &book.collection),
+            category: mine_or(&self.category, &book.category),
+            year: self.year.or(book.year),
+            isbn: mine_or(&self.isbn, &book.isbn),
+        }
     }
 }
 
@@ -472,6 +510,29 @@ impl Library {
 
     // ------------------------------------------------------------ requêtes
 
+    /// Livres (non archivés) qui semblent être le même livre que `input` :
+    /// même ISBN, ou même titre et même auteur (un auteur vide ne départage
+    /// pas). Sert à prévenir avant un doublon ; un nouvel exemplaire reste
+    /// possible avec `add_book`.
+    pub fn same_books(&self, input: &BookInput) -> Vec<u32> {
+        let isbn = isbn_key(&input.isbn);
+        let title = title_key(&input.title);
+        let author = title_key(&input.author);
+        self.books
+            .iter()
+            .filter(|b| !b.archived)
+            .filter(|b| {
+                let same_isbn = !isbn.is_empty() && isbn_key(&b.isbn) == isbn;
+                let other_author = title_key(&b.author);
+                let same_author =
+                    author.is_empty() || other_author.is_empty() || other_author == author;
+                let same_title = !title.is_empty() && title_key(&b.title) == title;
+                same_isbn || (same_title && same_author)
+            })
+            .map(|b| b.id)
+            .collect()
+    }
+
     /// Catégories déjà utilisées (livres non archivés), sans doublon de casse
     /// ni d'accents (la première orthographe rencontrée l'emporte), triées.
     pub fn categories(&self) -> Vec<String> {
@@ -869,6 +930,73 @@ mod tests {
         let json = r#"{"version":1,"books":[{"id":1,"title":"X","collection":"Folio"}]}"#;
         let lib: Library = serde_json::from_str(json).unwrap();
         assert_eq!(lib.book(1).unwrap().category, "");
+    }
+
+    #[test]
+    fn new_copy_takes_details_from_existing_book() {
+        let mut lib = Library::new();
+        let id = lib
+            .add_book(BookInput {
+                title: "Matilda".into(),
+                author: "Roald Dahl".into(),
+                category: "Roman".into(),
+                year: Some(1988),
+                ..Default::default()
+            })
+            .unwrap();
+        let typed = BookInput {
+            title: "matilda".into(),
+            collection: "Folio Junior".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            typed.filled_from(lib.book(id).unwrap()),
+            BookInput {
+                title: "Matilda".into(),
+                author: "Roald Dahl".into(),
+                collection: "Folio Junior".into(),
+                category: "Roman".into(),
+                year: Some(1988),
+                isbn: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn same_books_ignores_case_accents_and_punctuation() {
+        let mut lib = Library::new();
+        let mut input = book("L’Œil du loup");
+        input.author = "Daniel Pennac".into();
+        let ids = lib.add_copies(input, 2).unwrap();
+        let mut probe = book("l'oeil  du LOUP !");
+        probe.author = "daniel pennac".into();
+        assert_eq!(lib.same_books(&probe), ids);
+        // no author given: the title is enough
+        assert_eq!(lib.same_books(&book("L'œil du loup")), ids);
+        // another author: another book
+        probe.author = "Quelqu'un d'autre".into();
+        assert!(lib.same_books(&probe).is_empty());
+        assert!(lib.same_books(&book("L'Œil du lynx")).is_empty());
+    }
+
+    #[test]
+    fn same_books_matches_isbn_whatever_the_title() {
+        let mut lib = Library::new();
+        let mut input = book("Matilda");
+        input.isbn = "978-2-07-061275-8".into();
+        let id = lib.add_book(input).unwrap();
+        let mut probe = book("Matilda (poche)");
+        probe.isbn = "9782070612758".into();
+        assert_eq!(lib.same_books(&probe), vec![id]);
+    }
+
+    #[test]
+    fn same_books_skips_archived_and_empty_input() {
+        let mut lib = Library::new();
+        let id = lib.add_book(book("Tintin")).unwrap();
+        assert!(lib.same_books(&book("   ")).is_empty());
+        lib.archive_book(id).unwrap();
+        assert!(lib.same_books(&book("Tintin")).is_empty());
     }
 
     #[test]

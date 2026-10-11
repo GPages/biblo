@@ -3,11 +3,12 @@
 mod books;
 mod print_queue;
 mod register;
+mod theme;
 
 use std::path::{Path, PathBuf};
 
 use biblo::{code128, Store};
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, Margin, RichText, Stroke};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -25,7 +26,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(data_dir: PathBuf) -> App {
+    pub fn new(ctx: &egui::Context, data_dir: PathBuf) -> App {
+        theme::apply(ctx);
         let store = Store::open(&data_dir, biblo::today()).map_err(|e| e.to_string());
         App {
             data_dir,
@@ -39,49 +41,101 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("tabs").show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                for (view, text) in [(View::Books, "Livres"), (View::Register, "Enregistrer")] {
-                    ui.selectable_value(&mut self.view, view, RichText::new(text).size(18.0));
-                }
-            });
-            ui.add_space(2.0);
-        });
-
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.weak(format!("Données : {}", self.data_dir.display()));
-                if let Ok(store) = &self.store {
-                    if let Some(e) = store.backup_error() {
-                        ui.colored_label(
-                            ui.visuals().error_fg_color,
-                            format!("Sauvegarde du jour impossible : {e}"),
-                        );
+        egui::Panel::top("header")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BLUE)
+                    .inner_margin(Margin::symmetric(18, 10)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("📚 Biblo")
+                            .family(theme::bold())
+                            .size(30.0)
+                            .color(Color32::WHITE),
+                    );
+                    ui.label(
+                        RichText::new("La bibliothèque de l'école")
+                            .size(16.0)
+                            .color(Color32::from_white_alpha(220)),
+                    );
+                    ui.add_space(30.0);
+                    for (view, text) in [
+                        (View::Books, "📖  Livres"),
+                        (View::Register, "✏  Enregistrer"),
+                    ] {
+                        // The selected tab is a white pill, the others are see-through.
+                        let (fill, color) = if self.view == view {
+                            (Color32::WHITE, theme::BLUE)
+                        } else {
+                            (Color32::from_white_alpha(45), Color32::WHITE)
+                        };
+                        let tab = egui::Button::new(
+                            RichText::new(text)
+                                .family(theme::bold())
+                                .size(19.0)
+                                .color(color),
+                        )
+                        .fill(fill)
+                        .stroke(Stroke::NONE)
+                        .corner_radius(18)
+                        .min_size(egui::vec2(0.0, 40.0));
+                        if ui.add(tab).clicked() {
+                            self.view = view;
+                        }
                     }
-                }
+                });
             });
-        });
 
-        egui::CentralPanel::default().show(ui, |ui| match &mut self.store {
-            Err(message) => {
-                ui.heading("Impossible d'ouvrir les données");
-                ui.add_space(8.0);
-                ui.colored_label(ui.visuals().error_fg_color, message.as_str());
-                ui.add_space(8.0);
-                ui.label(format!(
-                    "Le fichier n'a pas été modifié. Dossier : {}",
-                    self.data_dir.display()
-                ));
-                ui.label(
-                    "Vous pouvez restaurer une sauvegarde depuis le sous-dossier « backups ».",
-                );
-            }
-            Ok(store) => match self.view {
-                View::Books => self.books.ui(ui, store),
-                View::Register => self.register.ui(ui, store, &self.data_dir),
-            },
-        });
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(0xF7, 0xEB, 0xCF))
+                    .inner_margin(Margin::symmetric(18, 4)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Données : {}", self.data_dir.display()))
+                            .small()
+                            .color(Color32::from_rgb(0x7A, 0x6A, 0x4A)),
+                    );
+                    if let Ok(store) = &self.store {
+                        if let Some(e) = store.backup_error() {
+                            ui.colored_label(
+                                ui.visuals().error_fg_color,
+                                format!("Sauvegarde du jour impossible : {e}"),
+                            );
+                        }
+                    }
+                });
+            });
+
+        let central = egui::Frame::new()
+            .fill(theme::PAPER)
+            .inner_margin(Margin::same(16));
+        egui::CentralPanel::default()
+            .frame(central)
+            .show(ui, |ui| match &mut self.store {
+                Err(message) => theme::card(ui, |ui| {
+                    ui.heading("⚠ Impossible d'ouvrir les données");
+                    ui.add_space(8.0);
+                    ui.colored_label(ui.visuals().error_fg_color, message.as_str());
+                    ui.add_space(8.0);
+                    ui.label(format!(
+                        "Le fichier n'a pas été modifié. Dossier : {}",
+                        self.data_dir.display()
+                    ));
+                    ui.label(
+                        "Vous pouvez restaurer une sauvegarde depuis le sous-dossier « backups ».",
+                    );
+                }),
+                Ok(store) => match self.view {
+                    View::Books => self.books.ui(ui, store),
+                    View::Register => self.register.ui(ui, store, &self.data_dir),
+                },
+            });
     }
 }
 
@@ -95,18 +149,10 @@ impl Message {
     pub fn show(&self, ui: &mut egui::Ui) {
         match self {
             Message::Ok(text) => {
-                ui.label(
-                    RichText::new(text)
-                        .color(Color32::from_rgb(40, 140, 60))
-                        .strong(),
-                );
+                ui.label(RichText::new(format!("✔ {text}")).color(theme::GREEN));
             }
             Message::Err(text) => {
-                ui.label(
-                    RichText::new(text)
-                        .color(ui.visuals().error_fg_color)
-                        .strong(),
-                );
+                ui.label(RichText::new(format!("⚠ {text}")).color(theme::RED));
             }
         }
     }
