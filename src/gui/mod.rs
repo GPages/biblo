@@ -67,9 +67,13 @@ impl eframe::App for App {
                             .color(Color32::WHITE),
                     );
                     ui.label(
-                        RichText::new("La bibliothèque de l'école")
-                            .size(16.0)
-                            .color(Color32::from_white_alpha(220)),
+                        RichText::new(if cfg!(feature = "demo") {
+                            "Démonstration (données fictives)"
+                        } else {
+                            "La bibliothèque de l'école"
+                        })
+                        .size(16.0)
+                        .color(Color32::from_white_alpha(220)),
                     );
                     ui.add_space(30.0);
                     for (view, text) in [

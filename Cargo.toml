@@ -12,3 +12,11 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 eframe = "0.36.2"
 egui_extras = { version = "0.36", default-features = false }
+
+[profile.release]
+# Smaller .exe: no debug symbols.
+strip = true
+
+[features]
+# Demonstration build: the first start fills an empty data folder with sample data.
+demo = []
