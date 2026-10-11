@@ -139,6 +139,15 @@ fn days(n: i64) -> String {
     }
 }
 
+/// The book's note on a line of its own, so its condition can be checked
+/// when it goes out and when it comes back.
+fn note_line(lib: &Library, book: u32) -> String {
+    lib.book(book)
+        .filter(|b| !b.note.is_empty())
+        .map(|b| format!("\n📝 Note : {}", b.note.replace('\n', " · ")))
+        .unwrap_or_default()
+}
+
 /// Borrower, loan date and days out of a loan.
 fn loan_info(lib: &Library, loan: u32, today: NaiveDate) -> (String, String, String) {
     lib.loans()
@@ -609,12 +618,13 @@ impl LoansView {
                         Mode::Lend.done(),
                         "📤 Prêt enregistré",
                         format!(
-                            "{} ({}) est prêté à {} le {}.\n\
+                            "{} ({}) est prêté à {} le {}.{}\n\
                              Livre suivant : scannez à nouveau une carte d'élève.",
                             title(lib, book),
                             book_code(book),
                             name(lib, student),
-                            format_date(date)
+                            format_date(date),
+                            note_line(lib, book)
                         ),
                     )
                     .undoable(),
@@ -638,10 +648,11 @@ impl LoansView {
                         Mode::Return.done(),
                         "📥 Retour enregistré",
                         format!(
-                            "{} ({}) est rendu par {who} (emprunté le {since}).\n\
+                            "{} ({}) est rendu par {who} (emprunté le {since}).{}\n\
                              Il est de nouveau disponible.",
                             title(lib, book),
-                            book_code(book)
+                            book_code(book),
+                            note_line(lib, book)
                         ),
                     )
                     .undoable(),

@@ -1,13 +1,14 @@
-//! Main view: the list of books, filtered live as the user types.
+//! Books tab: the list of books, filtered live as the user types, with a
+//! note on each copy (damaged, to repair…).
 
 use biblo::codes::book_code;
 use biblo::dates::format_date;
 use biblo::search::{fold, Query};
 use biblo::{Book, Store};
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, Layout, Margin, RichText};
 use egui_extras::{Column, TableBuilder};
 
-use super::theme;
+use super::{theme, Message};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Status {
@@ -17,10 +18,20 @@ enum Status {
     OnLoan,
 }
 
+/// The note being written for one copy.
+struct NoteForm {
+    book: u32,
+    text: String,
+    focus: bool,
+}
+
 #[derive(Default)]
 pub struct BooksView {
     query: String,
     status: Status,
+    only_notes: bool,
+    note_form: Option<NoteForm>,
+    message: Option<Message>,
 }
 
 struct Row<'a> {
@@ -32,18 +43,13 @@ struct Row<'a> {
 }
 
 impl BooksView {
-    pub fn ui(&mut self, ui: &mut egui::Ui, store: &Store) {
-        let lib = store.lib();
-        let open_loans = lib.open_loans_by_book();
-
+    pub fn ui(&mut self, ui: &mut egui::Ui, store: &mut Store) {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("🔍").size(22.0));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .hint_text(
-                            "titre, auteur, collection, catégorie, année, ISBN, code, élève…",
-                        )
+                        .hint_text("titre, auteur, catégorie, code, élève, note…")
                         .desired_width(440.0),
                 );
                 if ui.button("Effacer").clicked() {
@@ -54,13 +60,24 @@ impl BooksView {
                 ui.selectable_value(&mut self.status, Status::Available, "Disponibles");
                 ui.selectable_value(&mut self.status, Status::OnLoan, "Prêtés");
             });
+            ui.checkbox(
+                &mut self.only_notes,
+                "📝 Seulement les livres qui ont une note (abîmés, à réparer…)",
+            );
+            if let Some(m) = &self.message {
+                m.show(ui);
+            }
+            self.note_box(ui, store);
         });
 
+        let lib = store.lib();
+        let open_loans = lib.open_loans_by_book();
         let query = Query::new(&self.query);
         let mut rows: Vec<(String, Row)> = lib
             .books()
             .iter()
             .filter(|b| !b.archived)
+            .filter(|b| !self.only_notes || !b.note.is_empty())
             .filter_map(|book| {
                 let loan = open_loans.get(&book.id);
                 match (self.status, loan) {
@@ -89,6 +106,7 @@ impl BooksView {
                     &row.year,
                     &book.isbn,
                     status,
+                    &book.note,
                 ];
                 query.matches(&fields).then(|| (fold(&book.title), row))
             })
@@ -103,6 +121,7 @@ impl BooksView {
         });
         ui.add_space(4.0);
 
+        let mut edit_note = None;
         theme::card(ui, |ui| {
             if total == 0 {
                 ui.label(
@@ -111,27 +130,101 @@ impl BooksView {
             } else if rows.is_empty() {
                 ui.label("🔍 Aucun livre ne correspond.");
             } else {
-                book_table(ui, &rows);
+                edit_note = book_table(ui, &rows);
             }
         });
+        if let Some(book) = edit_note.and_then(|id| lib.book(id)) {
+            self.note_form = Some(NoteForm {
+                book: book.id,
+                text: book.note.clone(),
+                focus: true,
+            });
+            self.message = None;
+        }
+    }
+
+    /// Editor for the note of the copy chosen in the list.
+    fn note_box(&mut self, ui: &mut egui::Ui, store: &mut Store) {
+        let Some(form) = &mut self.note_form else {
+            return;
+        };
+        let Some(book) = store.lib().book(form.book) else {
+            self.note_form = None;
+            return;
+        };
+        let what = format!("« {} » ({})", book.title, book_code(book.id));
+        let had_note = !book.note.is_empty();
+        let (mut save, mut remove, mut cancel) = (false, false, false);
+        egui::Frame::new()
+            .fill(theme::NOTE.0)
+            .corner_radius(12)
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(format!("📝 Note sur {what}"))
+                        .family(theme::bold())
+                        .color(theme::NOTE.1),
+                );
+                let field = ui.add(
+                    egui::TextEdit::multiline(&mut form.text)
+                        .hint_text("Par exemple : couverture abîmée, page 12 déchirée, à réparer…")
+                        .desired_rows(3)
+                        .desired_width(600.0),
+                );
+                if std::mem::take(&mut form.focus) {
+                    field.request_focus();
+                }
+                ui.horizontal(|ui| {
+                    save = ui
+                        .add(theme::main_button("Enregistrer la note", theme::GREEN))
+                        .clicked();
+                    if had_note {
+                        remove = ui.button("Supprimer la note").clicked();
+                    }
+                    cancel = ui.button("Annuler").clicked();
+                });
+            });
+        if save || remove {
+            let (id, text) = (form.book, if remove { "" } else { form.text.as_str() });
+            let result = store.apply(|lib| lib.set_book_note(id, text));
+            let removed = store.lib().book(id).is_some_and(|b| b.note.is_empty());
+            self.message = Some(match result {
+                Err(e) => Message::Err(e.to_string()),
+                Ok(()) if removed => Message::Ok(format!("Note supprimée : {what}.")),
+                Ok(()) => Message::Ok(format!("Note enregistrée : {what}.")),
+            });
+            self.note_form = None;
+        } else if cancel {
+            self.note_form = None;
+        }
     }
 }
 
-fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) {
+/// The note on one line, for the list.
+fn one_line(note: &str) -> String {
+    note.lines().collect::<Vec<_>>().join(" · ")
+}
+
+/// Returns the book whose 📝 button was clicked.
+fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
+    let mut edit_note = None;
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::auto())
-        .column(Column::initial(230.0).at_least(80.0).clip(true))
-        .column(Column::initial(150.0).at_least(60.0).clip(true))
+        .column(Column::auto())
+        .column(Column::initial(210.0).at_least(80.0).clip(true))
+        .column(Column::initial(135.0).at_least(60.0).clip(true))
         .column(Column::initial(110.0).at_least(60.0).clip(true))
         .column(Column::initial(120.0).at_least(60.0).clip(true))
         .column(Column::auto())
-        .column(Column::initial(90.0).at_least(50.0).clip(true))
+        .column(Column::initial(75.0).at_least(50.0).clip(true))
         .column(Column::remainder().at_least(100.0).clip(true))
         .header(26.0, |mut header| {
             for title in [
+                "",
                 "Code",
                 "Titre",
                 "Auteur",
@@ -147,12 +240,42 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) {
             }
         })
         .body(|body| {
-            body.rows(30.0, rows.len(), |mut table_row| {
+            // A book with a note gets a taller row: the note goes under the title.
+            let heights = rows
+                .iter()
+                .map(|(_, r)| if r.book.note.is_empty() { 30.0 } else { 52.0 });
+            body.heterogeneous_rows(heights, |mut table_row| {
                 let (_, row) = &rows[table_row.index()];
+                table_row.col(|ui| {
+                    let hint = if row.book.note.is_empty() {
+                        "Ajouter une note (abîmé, à réparer…)"
+                    } else {
+                        "Modifier ou supprimer la note"
+                    };
+                    if ui.small_button("📝").on_hover_text(hint).clicked() {
+                        edit_note = Some(row.book.id);
+                    }
+                });
                 table_row.col(|ui| {
                     ui.monospace(&row.code);
                 });
-                for text in [&row.book.title, &row.book.author, &row.book.collection] {
+                table_row.col(|ui| {
+                    if row.book.note.is_empty() {
+                        ui.add(egui::Label::new(&row.book.title).truncate());
+                        return;
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.add(egui::Label::new(&row.book.title).truncate());
+                        let note = RichText::new(format!("📝 {}", one_line(&row.book.note)))
+                            .italics()
+                            .size(15.0)
+                            .color(theme::NOTE.1);
+                        ui.add(egui::Label::new(note).truncate())
+                            .on_hover_text(&row.book.note);
+                    });
+                });
+                for text in [&row.book.author, &row.book.collection] {
                     table_row.col(|ui| {
                         ui.label(text);
                     });
@@ -175,4 +298,5 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) {
                 });
             });
         });
+    edit_note
 }

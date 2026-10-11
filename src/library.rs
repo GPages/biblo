@@ -18,6 +18,16 @@ fn clean_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Note sur plusieurs lignes : espaces superflus retirés ligne par ligne,
+/// lignes vides supprimées.
+fn clean_note(s: &str) -> String {
+    s.lines()
+        .map(clean_text)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Clé de comparaison des noms : sans casse ni accents (« Léa » = « LEA »).
 fn name_key(s: &str) -> String {
     fold(&clean_text(s))
@@ -127,6 +137,10 @@ pub struct Book {
     /// Retiré du catalogue (l'historique des prêts est conservé).
     #[serde(default)]
     pub archived: bool,
+    /// Remarque libre sur cet exemplaire (« couverture abîmée »…) ; vide si
+    /// aucune. Propre à l'exemplaire : un nouvel exemplaire n'en hérite pas.
+    #[serde(default)]
+    pub note: String,
 }
 
 // ---------------------------------------------------------------- Élèves
@@ -282,6 +296,7 @@ impl Library {
                 year: input.year,
                 isbn: input.isbn,
                 archived: false,
+                note: String::new(),
             });
             ids.push(id);
         }
@@ -306,6 +321,17 @@ impl Library {
         book.category = clean.category;
         book.year = clean.year;
         book.isbn = clean.isbn;
+        Ok(())
+    }
+
+    /// Remplace la note d'un exemplaire (une note vide la supprime).
+    pub fn set_book_note(&mut self, id: u32, note: &str) -> Result<(), Error> {
+        let book = self
+            .books
+            .iter_mut()
+            .find(|b| b.id == id)
+            .ok_or(Error::BookNotFound(id))?;
+        book.note = clean_note(note);
         Ok(())
     }
 
@@ -1084,6 +1110,35 @@ mod tests {
         let json = r#"{"version":1,"books":[{"id":1,"title":"X","collection":"Folio"}]}"#;
         let lib: Library = serde_json::from_str(json).unwrap();
         assert_eq!(lib.book(1).unwrap().category, "");
+    }
+
+    #[test]
+    fn note_is_cleaned_kept_on_update_and_removable() {
+        let mut lib = Library::new();
+        let id = lib.add_book(book("Matilda")).unwrap();
+        assert_eq!(lib.book(id).unwrap().note, "");
+        lib.set_book_note(id, "  Couverture   abîmée \n\n  page 12 déchirée  ")
+            .unwrap();
+        assert_eq!(
+            lib.book(id).unwrap().note,
+            "Couverture abîmée\npage 12 déchirée"
+        );
+        // modifier le titre ne touche pas à la note
+        lib.update_book(id, &book("Matilda (poche)")).unwrap();
+        assert_eq!(
+            lib.book(id).unwrap().note,
+            "Couverture abîmée\npage 12 déchirée"
+        );
+        // un nouvel exemplaire n'hérite pas de la note
+        let copy = lib.add_book(book("Matilda")).unwrap();
+        assert_eq!(lib.book(copy).unwrap().note, "");
+        lib.set_book_note(id, " \n ").unwrap();
+        assert_eq!(lib.book(id).unwrap().note, "");
+        assert_eq!(lib.set_book_note(99, "x"), Err(Error::BookNotFound(99)));
+        // les fichiers d'avant les notes se chargent toujours
+        let json = r#"{"version":1,"books":[{"id":1,"title":"X"}]}"#;
+        let old: Library = serde_json::from_str(json).unwrap();
+        assert_eq!(old.book(1).unwrap().note, "");
     }
 
     #[test]

@@ -126,6 +126,16 @@ const FORMER_PUPILS: &[(&str, &str, &str, i32)] = &[
     ("Fabre", "Camille", "02/09/2013", 6),
 ];
 
+/// Notes on the last copy of a few titles, as the teacher would write them.
+const NOTES: &[(&str, &str)] = &[
+    ("Le Petit Prince", "Couverture abîmée"),
+    (
+        "Harry Potter à l'école des sorciers",
+        "Page 24 déchirée, à réparer",
+    ),
+    ("Matilda", "Offert par l'association des parents d'élèves"),
+];
+
 /// Classes of an elementary school, from the first year (CP, age 6) on.
 const CLASSES: [&str; 5] = ["CP", "CE1", "CE2", "CM1", "CM2"];
 
@@ -167,7 +177,10 @@ pub fn fill(lib: &mut Library, today: NaiveDate) -> Result<(), Error> {
             year,
             isbn: String::new(),
         };
-        lib.add_copies(input, copies)?;
+        let ids = lib.add_copies(input, copies)?;
+        if let (Some(&(_, note)), Some(&id)) = (NOTES.iter().find(|n| n.0 == title), ids.last()) {
+            lib.set_book_note(id, note)?;
+        }
     }
     // Registration: the 1st of September of a school year.
     let this_school_year = if today.month() >= 9 {

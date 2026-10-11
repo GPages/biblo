@@ -5,9 +5,10 @@
 use std::sync::Arc;
 
 use biblo::search::fold;
+use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, RichText,
-    Shadow, Stroke, TextStyle, Theme,
+    Sense, Shadow, Stroke, TextStyle, Theme,
 };
 
 // ----------------------------------------------------------------- palette
@@ -41,6 +42,11 @@ pub const INFO: Badge = (
 pub const ERROR: Badge = (
     Color32::from_rgb(0xFF, 0xE0, 0xE6),
     Color32::from_rgb(0xA8, 0x23, 0x4A),
+);
+/// Notes on books.
+pub const NOTE: Badge = (
+    Color32::from_rgb(0xF1, 0xE3, 0xFF),
+    Color32::from_rgb(0x6B, 0x2F, 0xA8),
 );
 
 /// Loan desk: everything about lending is blue and everything about
@@ -246,15 +252,21 @@ fn card_with_border<R>(
         .inner
 }
 
-/// Small rounded coloured label (status, category).
+/// Small rounded coloured label (status, category). Painted at its own
+/// size, so it keeps its shape in a tall table row.
 pub fn badge(ui: &mut egui::Ui, text: &str, (fill, color): Badge) {
-    egui::Frame::new()
-        .fill(fill)
-        .corner_radius(10)
-        .inner_margin(Margin::symmetric(8, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).color(color).size(15.0));
-        });
+    let margin = egui::vec2(8.0, 3.0);
+    let mut job = LayoutJob::simple_singleline(text.to_owned(), FontId::proportional(15.0), color);
+    // Cut with "…" when there is not enough room; the full text shows on hover.
+    job.wrap = TextWrapping::truncate_at_width((ui.available_width() - 2.0 * margin.x).max(0.0));
+    let galley = ui.painter().layout_job(job);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + 2.0 * margin, Sense::hover());
+    let elided = galley.elided;
+    ui.painter().rect_filled(rect, 10.0, fill);
+    ui.painter().galley(rect.min + margin, galley, color);
+    if elided {
+        response.on_hover_text(text);
+    }
 }
 
 /// Coloured button for the main action of a card.
