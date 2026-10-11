@@ -10,7 +10,7 @@ use eframe::egui::{self, Align, Layout, Margin, RichText};
 use egui_extras::{Column, TableBuilder};
 
 use super::print_queue::PrintQueue;
-use super::{theme, Message};
+use super::{text_with_choices, theme, Message};
 
 pub struct RegisterView {
     // New book form.
@@ -30,6 +30,7 @@ pub struct RegisterView {
     last_name: String,
     first_name: String,
     birth_date: String,
+    class: String,
     student_message: Option<Message>,
     student_query: String,
 
@@ -52,6 +53,7 @@ impl Default for RegisterView {
             last_name: String::new(),
             first_name: String::new(),
             birth_date: String::new(),
+            class: String::new(),
             student_message: None,
             student_query: String::new(),
             student_cards: PrintQueue::new(Kind::Student),
@@ -320,8 +322,12 @@ impl RegisterView {
                         .desired_width(240.0),
                 );
                 ui.end_row();
+                ui.label("Classe");
+                let classes = store.lib().classes();
+                text_with_choices(ui, "class_pick", &mut self.class, "CP, CE1…", classes);
+                ui.end_row();
             });
-        ui.weak("* obligatoire.");
+        ui.weak("* obligatoire. La classe peut être ajoutée ou changée plus tard, dans l'onglet Élèves.");
         ui.add_space(6.0);
         if ui
             .add(theme::main_button("Enregistrer l'élève", theme::GREEN))
@@ -345,13 +351,20 @@ impl RegisterView {
             return Message::Err("La date de naissance est dans le futur.".into());
         }
         let (last, first) = (self.last_name.clone(), self.first_name.clone());
-        match store.apply(|lib| lib.add_student(&last, &first, birth, today)) {
+        let class = self.class.clone();
+        let added = store.apply(|lib| {
+            let id = lib.add_student(&last, &first, birth, today)?;
+            lib.set_student_class(id, &class)?;
+            Ok(id)
+        });
+        match added {
             Err(e) => Message::Err(e.to_string()),
             Ok(id) => {
                 self.student_cards.push([id]);
                 self.last_name.clear();
                 self.first_name.clear();
                 self.birth_date.clear();
+                // The class stays: pupils are usually entered class by class.
                 let name = store
                     .lib()
                     .student(id)
@@ -368,7 +381,7 @@ impl RegisterView {
         ui.heading(format!("👫 Élèves inscrits ({})", all.len()));
         ui.add_space(4.0);
         let query = Query::new(&self.student_query);
-        let mut rows: Vec<(String, u32, [String; 4])> = all
+        let mut rows: Vec<(String, u32, [String; 5])> = all
             .iter()
             .map(|s| {
                 let key = fold(&format!("{}\n{}", s.last_name, s.first_name));
@@ -377,6 +390,7 @@ impl RegisterView {
                     s.last_name.clone(),
                     s.first_name.clone(),
                     format_date(s.birth_date),
+                    s.class.clone(),
                 ];
                 (key, s.id, cells)
             })
@@ -388,7 +402,7 @@ impl RegisterView {
             ui.label(RichText::new("🔍").size(20.0));
             ui.add(
                 egui::TextEdit::singleline(&mut self.student_query)
-                    .hint_text("nom, prénom, date, code…")
+                    .hint_text("nom, prénom, classe, code…")
                     .desired_width(260.0),
             );
         });
@@ -419,9 +433,10 @@ impl RegisterView {
             .column(Column::auto())
             .column(Column::initial(140.0).at_least(60.0).clip(true))
             .column(Column::initial(120.0).at_least(60.0).clip(true))
-            .column(Column::remainder())
+            .column(Column::auto())
+            .column(Column::remainder().clip(true))
             .header(26.0, |mut header| {
-                for title in ["Code", "Nom", "Prénom", "Né(e) le"] {
+                for title in ["Code", "Nom", "Prénom", "Né(e) le", "Classe"] {
                     header.col(|ui| {
                         ui.label(RichText::new(title).family(theme::bold()));
                     });

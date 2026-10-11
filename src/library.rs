@@ -23,6 +23,17 @@ fn name_key(s: &str) -> String {
     fold(&clean_text(s))
 }
 
+/// Rang d'une classe dans l'ordre de l'école, d'après le début de son nom
+/// (`key` déjà passé par `fold`) : « ce1 b » et « ce1-ce2 » se rangent avec
+/// le CE1. Les noms inconnus viennent après.
+fn class_rank(key: &str) -> usize {
+    const LEVELS: [&str; 8] = ["ps", "ms", "gs", "cp", "ce1", "ce2", "cm1", "cm2"];
+    LEVELS
+        .iter()
+        .position(|level| key.starts_with(level))
+        .unwrap_or(LEVELS.len())
+}
+
 /// Clé de comparaison des titres et auteurs : sans casse, accents ni
 /// ponctuation (« L’Œil du loup ! » = « l'oeil du loup »).
 fn title_key(s: &str) -> String {
@@ -130,6 +141,9 @@ pub struct Student {
     /// Biblo ne la conserve).
     #[serde(default)]
     pub registered_on: Option<NaiveDate>,
+    /// Classe (facultative), par exemple « CE1 » ; vide si inconnue.
+    #[serde(default)]
+    pub class: String,
 }
 
 /// Résultat d'une suppression en lot.
@@ -368,8 +382,20 @@ impl Library {
             first_name: first,
             birth_date,
             registered_on: Some(registered_on),
+            class: String::new(),
         });
         Ok(id)
+    }
+
+    /// Change la classe d'un élève (une classe vide = pas de classe).
+    pub fn set_student_class(&mut self, id: u32, class: &str) -> Result<(), Error> {
+        let s = self
+            .students
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(Error::StudentNotFound(id))?;
+        s.class = clean_text(class);
+        Ok(())
     }
 
     pub fn update_student(
@@ -560,6 +586,22 @@ impl Library {
         }
         seen.sort();
         seen.into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// Classes déjà utilisées, sans doublon de casse ni d'accents (la
+    /// première orthographe rencontrée l'emporte), dans l'ordre de l'école :
+    /// PS, MS, GS, CP, CE1, CE2, CM1, CM2, puis les autres par ordre
+    /// alphabétique.
+    pub fn classes(&self) -> Vec<String> {
+        let mut seen: Vec<(usize, String, String)> = Vec::new();
+        for s in self.students.iter().filter(|s| !s.class.is_empty()) {
+            let key = fold(&s.class);
+            if !seen.iter().any(|(_, k, _)| *k == key) {
+                seen.push((class_rank(&key), key, s.class.clone()));
+            }
+        }
+        seen.sort();
+        seen.into_iter().map(|(_, _, c)| c).collect()
     }
 
     pub fn open_loan_for_book(&self, book_id: u32) -> Option<&Loan> {
@@ -831,6 +873,44 @@ mod tests {
         let json = r#"{"students":[{"id":1,"last_name":"A","first_name":"B","birth_date":"2017-01-02"}]}"#;
         let old: Library = serde_json::from_str(json).unwrap();
         assert_eq!(old.student(1).unwrap().registered_on, None);
+    }
+
+    #[test]
+    fn class_is_optional_cleaned_and_editable() {
+        let mut lib = Library::new();
+        let id = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        assert_eq!(lib.student(id).unwrap().class, "");
+        lib.set_student_class(id, "  CE1   b ").unwrap();
+        assert_eq!(lib.student(id).unwrap().class, "CE1 b");
+        lib.set_student_class(id, " ").unwrap();
+        assert_eq!(lib.student(id).unwrap().class, "");
+        assert_eq!(
+            lib.set_student_class(99, "CP"),
+            Err(Error::StudentNotFound(99))
+        );
+        // les fichiers d'avant les classes se chargent toujours
+        let json = r#"{"students":[{"id":1,"last_name":"A","first_name":"B","birth_date":"2017-01-02"}]}"#;
+        let old: Library = serde_json::from_str(json).unwrap();
+        assert_eq!(old.student(1).unwrap().class, "");
+    }
+
+    #[test]
+    fn classes_are_distinct_and_in_school_order() {
+        let mut lib = Library::new();
+        for (i, class) in ["CM2", "Ulis", "cp", "CE1-CE2", "", "CP", "ce1", "GS", "Cm1"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = lib
+                .add_student("Élève", &format!("N{i}"), BIRTH, REG)
+                .unwrap();
+            lib.set_student_class(id, class).unwrap();
+        }
+        // CE1-CE2 se range avec le CE1 ; la première orthographe l'emporte
+        assert_eq!(
+            lib.classes(),
+            vec!["GS", "cp", "ce1", "CE1-CE2", "Cm1", "CM2", "Ulis"]
+        );
     }
 
     #[test]

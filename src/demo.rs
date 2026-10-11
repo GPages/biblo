@@ -126,6 +126,9 @@ const FORMER_PUPILS: &[(&str, &str, &str, i32)] = &[
     ("Fabre", "Camille", "02/09/2013", 6),
 ];
 
+/// Classes of an elementary school, from the first year (CP, age 6) on.
+const CLASSES: [&str; 5] = ["CP", "CE1", "CE2", "CM1", "CM2"];
+
 /// Pupils were first registered when the school started using Biblo,
 /// this many school years ago (or when they entered CP, if later).
 const BIBLO_SINCE: i32 = 3;
@@ -178,7 +181,13 @@ pub fn fill(lib: &mut Library, today: NaiveDate) -> Result<(), Error> {
         let birth = parse_date(birth).expect("dates in PUPILS are valid");
         let enters_cp = birth.year() + 6;
         let registered = september(enters_cp.max(this_school_year - BIBLO_SINCE));
-        pupils.push(lib.add_student(last, first, birth, registered)?);
+        let id = lib.add_student(last, first, birth, registered)?;
+        // Class from the age; none once past CM2 (when the demo is run years later).
+        let level = usize::try_from(this_school_year - enters_cp).ok();
+        if let Some(class) = level.and_then(|l| CLASSES.get(l)) {
+            lib.set_student_class(id, class)?;
+        }
+        pupils.push(id);
     }
     let mut former = Vec::new();
     for &(last, first, birth, years_ago) in FORMER_PUPILS {

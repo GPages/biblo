@@ -9,6 +9,7 @@ mod theme;
 
 use std::path::{Path, PathBuf};
 
+use biblo::search::fold;
 use biblo::{code128, Store};
 use eframe::egui::{self, Color32, Margin, RichText, Stroke};
 
@@ -66,18 +67,21 @@ impl eframe::App for App {
                             .size(30.0)
                             .color(Color32::WHITE),
                     );
-                    ui.label(
-                        RichText::new(if cfg!(feature = "demo") {
-                            "Démonstration (données fictives)"
-                        } else {
-                            "La bibliothèque de l'école"
-                        })
-                        .size(16.0)
-                        .color(Color32::from_white_alpha(220)),
-                    );
+                    // In a narrow window the tabs need the room.
+                    if ui.available_width() > 950.0 {
+                        ui.label(
+                            RichText::new(if cfg!(feature = "demo") {
+                                "Démonstration (données fictives)"
+                            } else {
+                                "La bibliothèque de l'école"
+                            })
+                            .size(16.0)
+                            .color(Color32::from_white_alpha(220)),
+                        );
+                    }
                     ui.add_space(30.0);
                     for (view, text) in [
-                        (View::Loans, "🔁  Prêts"),
+                        (View::Loans, "🔁  Prêts et retours"),
                         (View::Books, "📖  Livres"),
                         (View::Students, "👫  Élèves"),
                         (View::Register, "✏  Enregistrer"),
@@ -175,6 +179,37 @@ impl Message {
             }
         }
     }
+}
+
+/// Text field followed by a "Choisir…" list of the values already in use,
+/// so that a class is always spelled the same way.
+pub fn text_with_choices(
+    ui: &mut egui::Ui,
+    id: &str,
+    text: &mut String,
+    hint: &str,
+    choices: Vec<String>,
+) {
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(text)
+                .hint_text(hint)
+                .desired_width(200.0),
+        );
+        if !choices.is_empty() {
+            egui::ComboBox::from_id_salt(id)
+                .selected_text("Choisir…")
+                .height(500.0)
+                .show_ui(ui, |ui| {
+                    for choice in choices {
+                        let current = fold(&choice) == fold(text);
+                        if ui.selectable_label(current, &choice).clicked() {
+                            *text = choice;
+                        }
+                    }
+                });
+        }
+    });
 }
 
 /// Draws a barcode on a white background (also in dark mode), quiet zones included.

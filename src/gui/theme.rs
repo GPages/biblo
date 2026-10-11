@@ -42,6 +42,14 @@ pub const ERROR: Badge = (
     Color32::from_rgb(0xFF, 0xE0, 0xE6),
     Color32::from_rgb(0xA8, 0x23, 0x4A),
 );
+
+/// Loan desk: everything about lending is blue and everything about
+/// returning is orange, so the two can't be mistaken for each other.
+pub const LEND: Color32 = BLUE;
+pub const LEND_SOFT: Badge = INFO;
+pub const RETURN: Color32 = Color32::from_rgb(0xC2, 0x56, 0x00);
+pub const RETURN_SOFT: Badge = ON_LOAN;
+
 const BADGES: [Badge; 8] = [
     (
         Color32::from_rgb(0xDC, 0xEB, 0xFF),
@@ -203,9 +211,26 @@ pub fn apply(ctx: &egui::Context) {
 
 /// A white rounded card with a soft shadow, as wide as the space available.
 pub fn card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    card_with_border(ui, Stroke::new(1.0, LINE), add_contents)
+}
+
+/// A card with a thick coloured border, to show which mode a screen is in.
+pub fn outlined_card<R>(
+    ui: &mut egui::Ui,
+    color: Color32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    card_with_border(ui, Stroke::new(3.0, color), add_contents)
+}
+
+fn card_with_border<R>(
+    ui: &mut egui::Ui,
+    border: Stroke,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::Frame::new()
         .fill(CARD)
-        .stroke(Stroke::new(1.0, LINE))
+        .stroke(border)
         .corner_radius(16)
         .inner_margin(Margin::same(16))
         .shadow(Shadow {
