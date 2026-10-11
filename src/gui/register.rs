@@ -316,8 +316,8 @@ impl RegisterView {
                 ui.label("Date de naissance *");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.birth_date)
-                        .hint_text("jj/mm/aaaa")
-                        .desired_width(130.0),
+                        .hint_text("jj/mm/aaaa ou jjmmaaaa")
+                        .desired_width(240.0),
                 );
                 ui.end_row();
             });
@@ -337,7 +337,7 @@ impl RegisterView {
     fn save_student(&mut self, store: &mut Store) -> Message {
         let Some(birth) = parse_date(&self.birth_date) else {
             return Message::Err(
-                "Date de naissance invalide : jj/mm/aaaa, par exemple 14/05/2017.".into(),
+                "Date de naissance invalide : par exemple 14/05/2017 ou 14052017.".into(),
             );
         };
         if birth > biblo::today() {

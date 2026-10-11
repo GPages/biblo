@@ -13,14 +13,19 @@ fn digits(s: &str, max_len: usize) -> Option<u32> {
     s.parse().ok()
 }
 
-/// Lit `jj/mm/aaaa` (séparateurs `/`, `-` ou `.` acceptés ; année sur 4
-/// chiffres obligatoire ; date réelle obligatoire : le 31/02 est refusé).
+/// Lit `jj/mm/aaaa` : séparateurs `/`, `-`, `.` ou espace, ou bien 8 chiffres
+/// collés `jjmmaaaa` (`18041992`). Année sur 4 chiffres obligatoire ; date
+/// réelle obligatoire : le 31/02 est refusé.
 pub fn parse_date(input: &str) -> Option<NaiveDate> {
-    let parts: Vec<&str> = input
-        .trim()
-        .split(|c| c == '/' || c == '-' || c == '.')
-        .collect();
-    if parts.len() != 3 || parts[2].trim().len() != 4 {
+    let s = input.trim();
+    let parts: Vec<&str> = if s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit()) {
+        vec![&s[0..2], &s[2..4], &s[4..8]]
+    } else {
+        s.split(|c: char| matches!(c, '/' | '-' | '.') || c.is_whitespace())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    if parts.len() != 3 || parts[2].len() != 4 {
         return None;
     }
     let day = digits(parts[0], 2)?;
@@ -63,6 +68,19 @@ mod tests {
         assert_eq!(parse_date(" 05-03-2026 "), Some(d(2026, 3, 5)));
         assert_eq!(parse_date("05.03.2026"), Some(d(2026, 3, 5)));
         assert_eq!(parse_date("29/02/2028"), Some(d(2028, 2, 29)));
+    }
+
+    #[test]
+    fn parses_dates_without_slashes() {
+        assert_eq!(parse_date("18041992"), Some(d(1992, 4, 18)));
+        assert_eq!(parse_date(" 05032026 "), Some(d(2026, 3, 5)));
+        assert_eq!(parse_date("18 04 1992"), Some(d(1992, 4, 18)));
+        assert_eq!(parse_date("18 / 04 / 1992"), Some(d(1992, 4, 18)));
+        assert_eq!(parse_date("1804199"), None);
+        assert_eq!(parse_date("180419920"), None);
+        assert_eq!(parse_date("31022026"), None);
+        assert_eq!(parse_date("00012026"), None);
+        assert_eq!(parse_date("1804 1992"), None);
     }
 
     #[test]
