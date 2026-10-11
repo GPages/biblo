@@ -34,6 +34,14 @@ pub const ON_LOAN: Badge = (
     Color32::from_rgb(0xFF, 0xE6, 0xCC),
     Color32::from_rgb(0xA4, 0x51, 0x0B),
 );
+pub const INFO: Badge = (
+    Color32::from_rgb(0xDC, 0xEB, 0xFF),
+    Color32::from_rgb(0x1E, 0x4F, 0xA3),
+);
+pub const ERROR: Badge = (
+    Color32::from_rgb(0xFF, 0xE0, 0xE6),
+    Color32::from_rgb(0xA8, 0x23, 0x4A),
+);
 const BADGES: [Badge; 8] = [
     (
         Color32::from_rgb(0xDC, 0xEB, 0xFF),

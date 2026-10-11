@@ -1,6 +1,7 @@
 //! Window shell: tabs, status bar, and helpers shared by the views.
 
 mod books;
+mod loans;
 mod print_queue;
 mod register;
 mod theme;
@@ -12,6 +13,7 @@ use eframe::egui::{self, Color32, Margin, RichText, Stroke};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Loans,
     Books,
     Register,
 }
@@ -21,6 +23,7 @@ pub struct App {
     /// `Err` when the data file could not be read: nothing is ever written then.
     store: Result<Store, String>,
     view: View,
+    loans: loans::LoansView,
     books: books::BooksView,
     register: register::RegisterView,
 }
@@ -32,7 +35,8 @@ impl App {
         App {
             data_dir,
             store,
-            view: View::Books,
+            view: View::Loans,
+            loans: loans::LoansView::default(),
             books: books::BooksView::default(),
             register: register::RegisterView::default(),
         }
@@ -62,6 +66,7 @@ impl eframe::App for App {
                     );
                     ui.add_space(30.0);
                     for (view, text) in [
+                        (View::Loans, "🔁  Prêts"),
                         (View::Books, "📖  Livres"),
                         (View::Register, "✏  Enregistrer"),
                     ] {
@@ -132,6 +137,7 @@ impl eframe::App for App {
                     );
                 }),
                 Ok(store) => match self.view {
+                    View::Loans => self.loans.ui(ui, store),
                     View::Books => self.books.ui(ui, store),
                     View::Register => self.register.ui(ui, store, &self.data_dir),
                 },

@@ -7,10 +7,12 @@
 //! - `search`  : filtrage instantané, sans tenir compte des majuscules ni des accents
 //! - `code128` : encodage des codes-barres Code 128
 //! - `labels`  : planches d'étiquettes A4 au format PDF
+//! - `desk`    : interprétation d'un scan au poste de prêt
 
 pub mod code128;
 pub mod codes;
 pub mod dates;
+pub mod desk;
 pub mod error;
 pub mod labels;
 pub mod library;
