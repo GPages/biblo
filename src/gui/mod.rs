@@ -4,6 +4,7 @@ mod books;
 mod loans;
 mod print_queue;
 mod register;
+mod settings;
 mod students;
 mod theme;
 
@@ -19,6 +20,7 @@ enum View {
     Books,
     Students,
     Register,
+    Settings,
 }
 
 pub struct App {
@@ -32,6 +34,7 @@ pub struct App {
     /// Books out this many days or more are late (set in the pupils tab).
     late_days: i64,
     register: register::RegisterView,
+    settings: settings::SettingsView,
 }
 
 impl App {
@@ -47,7 +50,17 @@ impl App {
             students: students::StudentsView::default(),
             late_days: 21,
             register: register::RegisterView::default(),
+            settings: settings::SettingsView::default(),
         }
+    }
+
+    /// After a restore: forget what the screens held (selected pupil, forms,
+    /// cards to print…), it may not exist in the restored data.
+    fn reset_views(&mut self) {
+        self.loans = loans::LoansView::default();
+        self.books = books::BooksView::default();
+        self.students = students::StudentsView::default();
+        self.register = register::RegisterView::default();
     }
 }
 
@@ -106,6 +119,26 @@ impl eframe::App for App {
                             self.view = view;
                         }
                     }
+                    // Settings: a small icon on the far right, away from the tabs.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (fill, color) = if self.view == View::Settings {
+                            (Color32::WHITE, theme::BLUE)
+                        } else {
+                            (Color32::TRANSPARENT, Color32::from_white_alpha(200))
+                        };
+                        let button = egui::Button::new(RichText::new("⚙").size(22.0).color(color))
+                            .fill(fill)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(18)
+                            .min_size(egui::vec2(40.0, 40.0));
+                        if ui
+                            .add(button)
+                            .on_hover_text("Réglages : sauvegardes")
+                            .clicked()
+                        {
+                            self.view = View::Settings;
+                        }
+                    });
                 });
             });
 
@@ -136,29 +169,50 @@ impl eframe::App for App {
         let central = egui::Frame::new()
             .fill(theme::PAPER)
             .inner_margin(Margin::same(16));
-        egui::CentralPanel::default()
-            .frame(central)
-            .show(ui, |ui| match &mut self.store {
-                Err(message) => theme::card(ui, |ui| {
-                    ui.heading("⚠ Impossible d'ouvrir les données");
-                    ui.add_space(8.0);
-                    ui.colored_label(ui.visuals().error_fg_color, message.as_str());
-                    ui.add_space(8.0);
-                    ui.label(format!(
-                        "Le fichier n'a pas été modifié. Dossier : {}",
-                        self.data_dir.display()
-                    ));
-                    ui.label(
-                        "Vous pouvez restaurer une sauvegarde depuis le sous-dossier « backups ».",
-                    );
-                }),
-                Ok(store) => match self.view {
-                    View::Loans => self.loans.ui(ui, store, self.late_days),
-                    View::Books => self.books.ui(ui, store),
-                    View::Students => self.students.ui(ui, store, &mut self.late_days),
-                    View::Register => self.register.ui(ui, store, &self.data_dir),
-                },
-            });
+        egui::CentralPanel::default().frame(central).show(ui, |ui| {
+            if self.view == View::Settings {
+                if self.settings.ui(ui, &mut self.store, &self.data_dir) {
+                    self.reset_views();
+                }
+                return;
+            }
+            self.main_view(ui);
+        });
+    }
+}
+
+impl App {
+    fn main_view(&mut self, ui: &mut egui::Ui) {
+        match &mut self.store {
+            Err(message) => theme::card(ui, |ui| {
+                ui.heading("⚠ Impossible d'ouvrir les données");
+                ui.add_space(8.0);
+                ui.colored_label(ui.visuals().error_fg_color, message.as_str());
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "Le fichier n'a pas été modifié. Dossier : {}",
+                    self.data_dir.display()
+                ));
+                ui.add_space(8.0);
+                if ui
+                    .add(theme::main_button(
+                        "💾 Revenir à une sauvegarde…",
+                        theme::BLUE,
+                    ))
+                    .clicked()
+                {
+                    self.view = View::Settings;
+                }
+            }),
+            Ok(store) => match self.view {
+                View::Loans => self.loans.ui(ui, store, self.late_days),
+                View::Books => self.books.ui(ui, store),
+                View::Students => self.students.ui(ui, store, &mut self.late_days),
+                View::Register => self.register.ui(ui, store, &self.data_dir),
+                // Drawn before, even without data.
+                View::Settings => {}
+            },
+        }
     }
 }
 
