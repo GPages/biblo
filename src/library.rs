@@ -630,6 +630,23 @@ impl Library {
         seen.into_iter().map(|(_, _, c)| c).collect()
     }
 
+    /// Élèves d'une classe (sans tenir compte de la casse ni des accents),
+    /// triés par nom puis prénom.
+    pub fn students_in_class(&self, class: &str) -> Vec<u32> {
+        let key = name_key(class);
+        if key.is_empty() {
+            return Vec::new();
+        }
+        let mut found: Vec<(String, u32)> = self
+            .students
+            .iter()
+            .filter(|s| name_key(&s.class) == key)
+            .map(|s| (fold(&s.full_name()), s.id))
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
     pub fn open_loan_for_book(&self, book_id: u32) -> Option<&Loan> {
         self.loans
             .iter()
@@ -937,6 +954,27 @@ mod tests {
             lib.classes(),
             vec!["GS", "cp", "ce1", "CE1-CE2", "Cm1", "CM2", "Ulis"]
         );
+    }
+
+    #[test]
+    fn students_in_class_are_sorted_by_name() {
+        let mut lib = Library::new();
+        for (last, first, class) in [
+            ("Martin", "Léa", "CE1"),
+            ("Durand", "Tom", "ce1"),
+            ("Bénard", "Chloé", "CE2"),
+            ("Abel", "Zoé", ""),
+            ("Durand", "Jade", "Cé1"),
+        ] {
+            let id = lib.add_student(last, first, BIRTH, REG).unwrap();
+            lib.set_student_class(id, class).unwrap();
+        }
+        // Durand Jade, Durand Tom, Martin Léa
+        assert_eq!(lib.students_in_class(" CE1 "), vec![5, 2, 1]);
+        assert_eq!(lib.students_in_class("CE2"), vec![3]);
+        assert!(lib.students_in_class("CM2").is_empty());
+        // « pas de classe » n'est pas une classe
+        assert!(lib.students_in_class("").is_empty());
     }
 
     #[test]

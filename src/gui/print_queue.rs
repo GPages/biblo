@@ -48,6 +48,8 @@ pub struct PrintQueue {
     kind: Kind,
     ids: Vec<u32>,
     code_input: String,
+    /// Pupil cards: the class chosen to be added as a whole.
+    class: String,
     message: Option<Message>,
 }
 
@@ -57,6 +59,7 @@ impl PrintQueue {
             kind,
             ids: Vec::new(),
             code_input: String::new(),
+            class: String::new(),
             message: None,
         }
     }
@@ -134,6 +137,9 @@ impl PrintQueue {
                 }
             }
         });
+        if self.kind == Kind::Student {
+            self.class_row(ui, lib);
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let has_items = !self.ids.is_empty();
@@ -163,6 +169,9 @@ impl PrintQueue {
         egui::ScrollArea::vertical()
             .id_salt(t.file_prefix)
             .max_height(320.0)
+            // Inside the scrolling column it would otherwise shrink to a
+            // single card when it starts near the bottom of the window.
+            .min_scrolled_height(240.0)
             .show(ui, |ui| {
                 for (i, &id) in self.ids.iter().enumerate() {
                     let Some(label) = self.label(lib, id) else {
@@ -186,6 +195,49 @@ impl PrintQueue {
         if let Some(i) = remove {
             self.ids.remove(i);
         }
+    }
+
+    /// Pupil cards: adds every pupil of a class, in alphabetical order.
+    fn class_row(&mut self, ui: &mut egui::Ui, lib: &Library) {
+        let classes = lib.classes();
+        if classes.is_empty() {
+            ui.weak("Pour ajouter toute une classe, indiquez d'abord la classe des élèves.");
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label("Ajouter toute une classe :");
+            let selected = if self.class.is_empty() {
+                "Choisir…".to_string()
+            } else {
+                self.class.clone()
+            };
+            egui::ComboBox::from_id_salt("cards_class")
+                .selected_text(selected)
+                .height(500.0)
+                .show_ui(ui, |ui| {
+                    for class in classes {
+                        ui.selectable_value(&mut self.class, class.clone(), class);
+                    }
+                });
+            let pupils = lib.students_in_class(&self.class);
+            if pupils.is_empty() {
+                return;
+            }
+            let text = format!("Ajouter les {} élève(s)", pupils.len());
+            if ui.button(text).clicked() {
+                let added = self.push(pupils.iter().copied());
+                let class = &self.class;
+                self.message = Some(match added {
+                    0 => Message::Err(format!(
+                        "Les élèves de {class} sont déjà tous dans la liste."
+                    )),
+                    n if n < pupils.len() => Message::Ok(format!(
+                        "{n} carte(s) ajoutée(s) pour {class} (les autres y étaient déjà)."
+                    )),
+                    n => Message::Ok(format!("{n} carte(s) ajoutée(s) pour {class}.")),
+                });
+            }
+        });
     }
 
     fn add_typed_code(&mut self, lib: &Library) {
