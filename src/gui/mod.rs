@@ -4,6 +4,7 @@ mod books;
 mod loans;
 mod print_queue;
 mod register;
+mod students;
 mod theme;
 
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use eframe::egui::{self, Color32, Margin, RichText, Stroke};
 enum View {
     Loans,
     Books,
+    Students,
     Register,
 }
 
@@ -25,6 +27,9 @@ pub struct App {
     view: View,
     loans: loans::LoansView,
     books: books::BooksView,
+    students: students::StudentsView,
+    /// Books out this many days or more are late (set in the pupils tab).
+    late_days: i64,
     register: register::RegisterView,
 }
 
@@ -38,6 +43,8 @@ impl App {
             view: View::Loans,
             loans: loans::LoansView::default(),
             books: books::BooksView::default(),
+            students: students::StudentsView::default(),
+            late_days: 21,
             register: register::RegisterView::default(),
         }
     }
@@ -68,6 +75,7 @@ impl eframe::App for App {
                     for (view, text) in [
                         (View::Loans, "🔁  Prêts"),
                         (View::Books, "📖  Livres"),
+                        (View::Students, "👫  Élèves"),
                         (View::Register, "✏  Enregistrer"),
                     ] {
                         // The selected tab is a white pill, the others are see-through.
@@ -137,8 +145,9 @@ impl eframe::App for App {
                     );
                 }),
                 Ok(store) => match self.view {
-                    View::Loans => self.loans.ui(ui, store),
+                    View::Loans => self.loans.ui(ui, store, self.late_days),
                     View::Books => self.books.ui(ui, store),
+                    View::Students => self.students.ui(ui, store, &mut self.late_days),
                     View::Register => self.register.ui(ui, store, &self.data_dir),
                 },
             });

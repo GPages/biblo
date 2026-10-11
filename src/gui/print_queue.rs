@@ -98,7 +98,7 @@ impl PrintQueue {
         })
     }
 
-    /// Only existing, non-archived items can be printed.
+    /// Only existing pupils and non-archived books can be printed.
     fn check(&self, lib: &Library, id: u32) -> Result<(), Error> {
         match self.kind {
             Kind::Book => match lib.book(id) {
@@ -108,7 +108,6 @@ impl PrintQueue {
             },
             Kind::Student => match lib.student(id) {
                 None => Err(Error::StudentNotFound(id)),
-                Some(s) if s.archived => Err(Error::StudentArchived(id)),
                 Some(_) => Ok(()),
             },
         }

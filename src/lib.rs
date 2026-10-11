@@ -20,7 +20,7 @@ pub mod search;
 pub mod store;
 
 pub use error::Error;
-pub use library::{Book, BookInput, Library, Loan, Student};
+pub use library::{Book, BookInput, DeleteReport, Library, Loan, Student};
 pub use store::Store;
 
 /// Date du jour (heure locale de la machine).

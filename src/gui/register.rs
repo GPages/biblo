@@ -340,11 +340,12 @@ impl RegisterView {
                 "Date de naissance invalide : par exemple 14/05/2017 ou 14052017.".into(),
             );
         };
-        if birth > biblo::today() {
+        let today = biblo::today();
+        if birth > today {
             return Message::Err("La date de naissance est dans le futur.".into());
         }
         let (last, first) = (self.last_name.clone(), self.first_name.clone());
-        match store.apply(|lib| lib.add_student(&last, &first, birth)) {
+        match store.apply(|lib| lib.add_student(&last, &first, birth, today)) {
             Err(e) => Message::Err(e.to_string()),
             Ok(id) => {
                 self.student_cards.push([id]);
@@ -363,7 +364,7 @@ impl RegisterView {
 
     fn student_list(&mut self, ui: &mut egui::Ui, store: &Store) {
         let lib = store.lib();
-        let all: Vec<_> = lib.students().iter().filter(|s| !s.archived).collect();
+        let all: Vec<_> = lib.students().iter().collect();
         ui.heading(format!("👫 Élèves inscrits ({})", all.len()));
         ui.add_space(4.0);
         let query = Query::new(&self.student_query);

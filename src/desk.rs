@@ -21,7 +21,7 @@ pub enum Decision {
     NeedStudent { book: u32 },
     /// Not a code: look for pupils by name.
     SearchName(String),
-    /// Unknown or archived book or pupil.
+    /// Unknown pupil, or unknown or archived book.
     Refused(Error),
 }
 
@@ -41,7 +41,6 @@ pub fn decide(lib: &Library, student: Option<u32>, input: &str) -> Decision {
         None => Decision::SearchName(text.to_string()),
         Some(Scanned::Student(id)) => match lib.student(id) {
             None => Decision::Refused(Error::StudentNotFound(id)),
-            Some(s) if s.archived => Decision::Refused(Error::StudentArchived(id)),
             Some(_) => Decision::SelectStudent(id),
         },
         Some(Scanned::Book(id)) => match lib.book(id) {
@@ -59,7 +58,7 @@ pub fn decide(lib: &Library, student: Option<u32>, input: &str) -> Decision {
     }
 }
 
-/// Non-archived pupils matching `text` (name, first name, birth date or
+/// Pupils matching `text` (name, first name, birth date or
 /// code), sorted by name.
 pub fn find_students(lib: &Library, text: &str) -> Vec<u32> {
     let query = Query::new(text);
@@ -69,7 +68,6 @@ pub fn find_students(lib: &Library, text: &str) -> Vec<u32> {
     let mut found: Vec<(String, u32)> = lib
         .students()
         .iter()
-        .filter(|s| !s.archived)
         .filter(|s| {
             let code = student_code(s.id);
             let birth = format_date(s.birth_date);
@@ -101,8 +99,10 @@ mod tests {
             })
             .unwrap();
         }
-        lib.add_student("Martin", "Léa", d(2017, 5, 14)).unwrap();
-        lib.add_student("Durand", "Tom", d(2016, 11, 3)).unwrap();
+        lib.add_student("Martin", "Léa", d(2017, 5, 14), d(2025, 9, 1))
+            .unwrap();
+        lib.add_student("Durand", "Tom", d(2016, 11, 3), d(2025, 9, 1))
+            .unwrap();
         lib.lend(2, 2, d(2026, 10, 1)).unwrap();
         lib
     }
@@ -176,10 +176,10 @@ mod tests {
             decide(&lib, Some(1), "L1"),
             Decision::Refused(Error::BookArchived(1))
         );
-        lib.archive_student(1).unwrap();
+        lib.delete_student(1).unwrap();
         assert_eq!(
             decide(&lib, None, "E1"),
-            Decision::Refused(Error::StudentArchived(1))
+            Decision::Refused(Error::StudentNotFound(1))
         );
     }
 
@@ -201,14 +201,15 @@ mod tests {
     #[test]
     fn finds_pupils_by_name_without_accents() {
         let mut lib = library();
-        lib.add_student("Bénard", "Chloé", d(2018, 2, 27)).unwrap();
+        lib.add_student("Bénard", "Chloé", d(2018, 2, 27), d(2025, 9, 1))
+            .unwrap();
         assert_eq!(find_students(&lib, "lea"), vec![1]);
         assert_eq!(find_students(&lib, "benard chloe"), vec![3]);
         assert_eq!(find_students(&lib, "E000002"), vec![2]);
         // every pupil whose name contains "r", sorted by last name
         assert_eq!(find_students(&lib, "r"), vec![3, 2, 1]);
         assert!(find_students(&lib, "").is_empty());
-        lib.archive_student(1).unwrap();
+        lib.delete_student(1).unwrap();
         assert!(find_students(&lib, "lea").is_empty());
     }
 }

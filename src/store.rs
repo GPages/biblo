@@ -221,7 +221,7 @@ mod tests {
         {
             let mut store = Store::open(&t.0, d(2026, 10, 10)).unwrap();
             id = store.apply(|lib| lib.add_book(book("Le Petit Prince"))).unwrap();
-            let s = store.apply(|lib| lib.add_student("Martin", "Léa", d(2017, 5, 14))).unwrap();
+            let s = store.apply(|lib| lib.add_student("Martin", "Léa", d(2017, 5, 14), d(2025, 9, 1))).unwrap();
             store
                 .apply(|lib| lib.lend(id, s, d(2026, 10, 10)))
                 .unwrap();

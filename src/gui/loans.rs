@@ -10,8 +10,6 @@ use eframe::egui::{self, FontId, Key, Margin, RichText};
 
 use super::theme::{self, Badge};
 
-/// Loans out for this many days or more are shown as late.
-const LATE_DAYS: i64 = 21;
 /// Pupils suggested under the scan field while a name is typed.
 const MAX_SUGGESTIONS: usize = 8;
 
@@ -50,7 +48,7 @@ enum LastAction {
 pub struct LoansView {
     input: String,
     focus_scan: bool,
-    /// The pupil who is borrowing.
+    /// The pupil who is borrowing; cleared after each loan.
     student: Option<u32>,
     /// Book whose return waits for a confirmation.
     pending_return: Option<u32>,
@@ -89,7 +87,8 @@ fn name(lib: &Library, student: u32) -> String {
 }
 
 impl LoansView {
-    pub fn ui(&mut self, ui: &mut egui::Ui, store: &mut Store) {
+    /// `late_days`: books out this many days or more are shown as late.
+    pub fn ui(&mut self, ui: &mut egui::Ui, store: &mut Store, late_days: i64) {
         let today = biblo::today();
         if !self.date_edited {
             // Follows the clock, even if the app stays open past midnight.
@@ -106,7 +105,9 @@ impl LoansView {
                 self.feedback_banner(ui, store, colors, today);
             }
             ui.add_space(12.0);
-            theme::card(ui, |ui| self.student_card(ui, store.lib(), today));
+            theme::card(ui, |ui| {
+                self.student_card(ui, store.lib(), today, late_days)
+            });
         });
     }
 
@@ -249,7 +250,7 @@ impl LoansView {
         }
     }
 
-    fn student_card(&mut self, ui: &mut egui::Ui, lib: &Library, today: NaiveDate) {
+    fn student_card(&mut self, ui: &mut egui::Ui, lib: &Library, today: NaiveDate, late_days: i64) {
         let Some(s) = self.student.and_then(|id| lib.student(id)) else {
             ui.heading("🎒 Comment faire ?");
             ui.add_space(4.0);
@@ -288,7 +289,7 @@ impl LoansView {
                     "depuis le {} ({days} j)",
                     format_date(loan.borrowed_on)
                 ));
-                if days >= LATE_DAYS {
+                if days >= late_days {
                     theme::badge(ui, "⏰ en retard", theme::ERROR);
                 }
             });
@@ -411,13 +412,16 @@ impl LoansView {
         match store.apply(|lib| lib.lend(book, student, date)) {
             Ok(loan) => {
                 let lib = store.lib();
+                // One loan per card scan: the next book needs a card scan again,
+                // so a forgotten card can never put a book on the previous pupil.
+                self.student = None;
                 self.last_action = Some(LastAction::Lent(loan));
                 self.feedback = Some(
                     Feedback::new(
                         theme::AVAILABLE,
                         format!("✔ Prêté : {}", title(lib, book)),
                         format!(
-                            "à {} le {} ({})",
+                            "à {} le {} ({}). Pour le livre suivant, scannez à nouveau une carte.",
                             name(lib, student),
                             format_date(date),
                             book_code(book)

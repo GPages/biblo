@@ -17,7 +17,6 @@ pub enum Error {
     StudentNotFound(u32),
     LoanNotFound(u32),
     BookArchived(u32),
-    StudentArchived(u32),
     /// Le livre est déjà emprunté.
     AlreadyBorrowed(u32),
     /// Retour demandé pour un livre qui n'est pas emprunté.
@@ -49,9 +48,6 @@ impl fmt::Display for Error {
             Error::LoanNotFound(id) => write!(f, "Emprunt introuvable (n°{id})."),
             Error::BookArchived(id) => {
                 write!(f, "Le livre {} a été retiré du catalogue.", book_code(*id))
-            }
-            Error::StudentArchived(id) => {
-                write!(f, "L'élève {} a été archivé.", student_code(*id))
             }
             Error::AlreadyBorrowed(id) => {
                 write!(f, "Le livre {} est déjà emprunté.", book_code(*id))

@@ -147,6 +147,9 @@ pub fn apply(ctx: &egui::Context) {
         spacing.item_spacing = egui::vec2(10.0, 8.0);
         spacing.button_padding = egui::vec2(14.0, 5.0);
         spacing.interact_size.y = 30.0;
+        // Bigger tick boxes and radio buttons, in proportion with the text.
+        spacing.icon_width = 20.0;
+        spacing.icon_width_inner = 12.0;
 
         let v = &mut style.visuals;
         v.panel_fill = PAPER;
@@ -178,7 +181,8 @@ pub fn apply(ctx: &egui::Context) {
             &mut w.active,
             &mut w.open,
         ] {
-            state.corner_radius = CornerRadius::same(10);
+            // 6, not more: a rounder tick box would look like a radio button.
+            state.corner_radius = CornerRadius::same(6);
             state.fg_stroke.color = INK;
         }
         w.noninteractive.bg_stroke = Stroke::new(1.0, LINE);

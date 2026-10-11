@@ -1,5 +1,6 @@
-//! Demo data to show Biblo: about 55 books, 40 pupils and a school year of
-//! loans, some of them overdue.
+//! Demo data to show Biblo: about 55 books, 40 pupils (plus 4 who left the
+//! school last June, for the cleanup) and a school year of loans, some of
+//! them overdue.
 //!
 //!     cargo run --example demo_data             # fills target/debug/biblo-data
 //!     cargo run --example demo_data -- <folder> # any other data folder
@@ -119,6 +120,19 @@ const PUPILS: &[(&str, &str, &str)] = &[
     ("Le Gall", "Maëlys", "14/09/2018"),
 ];
 
+/// Pupils who left last June: last name, first name, birth date, and how many
+/// school years ago they were registered. The first one never returned a book.
+const FORMER_PUPILS: &[(&str, &str, &str, i32)] = &[
+    ("Perrin", "Théo", "15/06/2014", 5),
+    ("Garcia", "Lucas", "08/02/2014", 5),
+    ("Robin", "Manon", "23/11/2013", 6),
+    ("Fabre", "Camille", "02/09/2013", 6),
+];
+
+/// Pupils were first registered when the school started using Biblo,
+/// this many school years ago (or when they entered CP, if later).
+const BIBLO_SINCE: i32 = 3;
+
 /// How far back the loan history goes.
 const HISTORY_DAYS: i64 = 280;
 
@@ -154,20 +168,40 @@ fn fill(lib: &mut Library, today: NaiveDate) -> Result<(), Error> {
         };
         lib.add_copies(input, copies)?;
     }
+    // Registration: the 1st of September of a school year.
+    let this_school_year = if today.month() >= 9 {
+        today.year()
+    } else {
+        today.year() - 1
+    };
+    let september = |year: i32| NaiveDate::from_ymd_opt(year, 9, 1).expect("valid date");
+    let mut pupils = Vec::new();
     for &(last, first, birth) in PUPILS {
         let birth = parse_date(birth).expect("dates in PUPILS are valid");
-        lib.add_student(last, first, birth)?;
+        let enters_cp = birth.year() + 6;
+        let registered = september(enters_cp.max(this_school_year - BIBLO_SINCE));
+        pupils.push(lib.add_student(last, first, birth, registered)?);
+    }
+    let mut former = Vec::new();
+    for &(last, first, birth, years_ago) in FORMER_PUPILS {
+        let birth = parse_date(birth).expect("dates in FORMER_PUPILS are valid");
+        let registered = september(this_school_year - years_ago);
+        former.push(lib.add_student(last, first, birth, registered)?);
     }
 
     // Simulate every session: returns first, then new loans. A pupil holds
     // one book at a time; about 1 loan in 5 is "forgotten" for 4 to 9 weeks.
     let books: Vec<u32> = lib.books().iter().map(|b| b.id).collect();
-    let pupils: Vec<u32> = lib.students().iter().map(|s| s.id).collect();
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let mut out: Vec<(u32, NaiveDate)> = Vec::new(); // (book, planned return)
     let mut day = today - Duration::days(HISTORY_DAYS);
+    let mut first_session = true;
     while day <= today {
         if is_library_day(day) {
+            if std::mem::take(&mut first_session) {
+                // The book the first former pupil never brought back.
+                lib.lend(*books.last().expect("demo books"), former[0], day)?;
+            }
             let (back, still_out) = out.into_iter().partition(|&(_, due)| due <= day);
             out = still_out;
             for (book, _) in back {

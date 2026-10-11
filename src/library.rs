@@ -126,8 +126,18 @@ pub struct Student {
     pub last_name: String,
     pub first_name: String,
     pub birth_date: NaiveDate,
+    /// Date d'inscription (`None` pour les élèves enregistrés avant que
+    /// Biblo ne la conserve).
     #[serde(default)]
-    pub archived: bool,
+    pub registered_on: Option<NaiveDate>,
+}
+
+/// Résultat d'une suppression en lot.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DeleteReport {
+    pub deleted: Vec<u32>,
+    /// Laissés de côté : ils ont encore des livres.
+    pub kept_with_books: Vec<u32>,
 }
 
 impl Student {
@@ -324,13 +334,11 @@ impl Library {
     }
 
     /// Un élève est identifié par nom + prénom + date de naissance : on refuse
-    /// un doublon parmi les élèves non archivés (sans tenir compte de la casse
-    /// ni des accents).
+    /// un doublon (sans tenir compte de la casse ni des accents).
     fn name_taken(&self, last: &str, first: &str, birth: NaiveDate, except: Option<u32>) -> bool {
         let (l, f) = (name_key(last), name_key(first));
         self.students.iter().any(|s| {
-            !s.archived
-                && Some(s.id) != except
+            Some(s.id) != except
                 && name_key(&s.last_name) == l
                 && name_key(&s.first_name) == f
                 && s.birth_date == birth
@@ -342,6 +350,7 @@ impl Library {
         last_name: &str,
         first_name: &str,
         birth_date: NaiveDate,
+        registered_on: NaiveDate,
     ) -> Result<u32, Error> {
         let (last, first) = Self::clean_names(last_name, first_name)?;
         if self.name_taken(&last, &first, birth_date, None) {
@@ -358,7 +367,7 @@ impl Library {
             last_name: last,
             first_name: first,
             birth_date,
-            archived: false,
+            registered_on: Some(registered_on),
         });
         Ok(id)
     }
@@ -389,8 +398,25 @@ impl Library {
         Ok(())
     }
 
-    /// Archive l'élève (refusé s'il a des livres en cours). L'historique reste.
-    pub fn archive_student(&mut self, id: u32) -> Result<(), Error> {
+    /// Supprime plusieurs élèves d'un coup. Ceux qui ont encore des livres
+    /// sont laissés de côté (et listés dans le rapport) ; les codes inconnus
+    /// sont ignorés.
+    pub fn delete_students(&mut self, ids: &[u32]) -> DeleteReport {
+        let mut report = DeleteReport::default();
+        for &id in ids {
+            match self.delete_student(id) {
+                Ok(()) => report.deleted.push(id),
+                Err(Error::StudentHasLoans { .. }) => report.kept_with_books.push(id),
+                Err(_) => {}
+            }
+        }
+        report
+    }
+
+    /// Supprime définitivement l'élève et l'historique de ses prêts (refusé
+    /// s'il a des livres en cours). Son code n'est jamais réattribué : une
+    /// ancienne carte ne peut pas désigner un autre élève.
+    pub fn delete_student(&mut self, id: u32) -> Result<(), Error> {
         if self.student(id).is_none() {
             return Err(Error::StudentNotFound(id));
         }
@@ -398,27 +424,8 @@ impl Library {
         if count > 0 {
             return Err(Error::StudentHasLoans { student: id, count });
         }
-        if let Some(s) = self.students.iter_mut().find(|s| s.id == id) {
-            s.archived = true;
-        }
-        Ok(())
-    }
-
-    pub fn unarchive_student(&mut self, id: u32) -> Result<(), Error> {
-        let (last, first, birth) = match self.student(id) {
-            Some(s) => (s.last_name.clone(), s.first_name.clone(), s.birth_date),
-            None => return Err(Error::StudentNotFound(id)),
-        };
-        if self.name_taken(&last, &first, birth, Some(id)) {
-            return Err(Error::DuplicateStudent {
-                last_name: last,
-                first_name: first,
-                birth_date: birth,
-            });
-        }
-        if let Some(s) = self.students.iter_mut().find(|s| s.id == id) {
-            s.archived = false;
-        }
+        self.students.retain(|s| s.id != id);
+        self.loans.retain(|l| l.student_id != id);
         Ok(())
     }
 
@@ -431,10 +438,8 @@ impl Library {
             Some(b) if b.archived => return Err(Error::BookArchived(book_id)),
             Some(_) => {}
         }
-        match self.student(student_id) {
-            None => return Err(Error::StudentNotFound(student_id)),
-            Some(s) if s.archived => return Err(Error::StudentArchived(student_id)),
-            Some(_) => {}
+        if self.student(student_id).is_none() {
+            return Err(Error::StudentNotFound(student_id));
         }
         if self.open_loan_for_book(book_id).is_some() {
             return Err(Error::AlreadyBorrowed(book_id));
@@ -509,6 +514,16 @@ impl Library {
     }
 
     // ------------------------------------------------------------ requêtes
+
+    /// Élèves inscrits au plus tard le `cutoff`. Ceux dont la
+    /// date d'inscription est inconnue ne sont jamais sélectionnés.
+    pub fn registered_on_or_before(&self, cutoff: NaiveDate) -> Vec<u32> {
+        self.students
+            .iter()
+            .filter(|s| s.registered_on.is_some_and(|d| d <= cutoff))
+            .map(|s| s.id)
+            .collect()
+    }
 
     /// Livres (non archivés) qui semblent être le même livre que `input` :
     /// même ISBN, ou même titre et même auteur (un auteur vide ne départage
@@ -610,6 +625,7 @@ mod tests {
     }
 
     const BIRTH: NaiveDate = NaiveDate::from_ymd_opt(2017, 5, 14).unwrap();
+    const REG: NaiveDate = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
 
     fn book(title: &str) -> BookInput {
         BookInput {
@@ -651,10 +667,17 @@ mod tests {
         lib.archive_book(a).unwrap();
         let b = lib.add_book(book("B")).unwrap();
         assert_ne!(a, b);
-        let s1 = lib.add_student("Martin", "Léa", BIRTH).unwrap();
-        lib.archive_student(s1).unwrap();
-        let s2 = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s1 = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        lib.delete_student(s1).unwrap();
+        let s2 = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         assert_ne!(s1, s2);
+        // même après relecture du fichier : une vieille carte ne désigne
+        // jamais un autre élève
+        lib.delete_student(s2).unwrap();
+        let json = serde_json::to_string(&lib).unwrap();
+        let mut reloaded: Library = serde_json::from_str(&json).unwrap();
+        reloaded.after_load().unwrap();
+        assert!(reloaded.add_student("Durand", "Tom", BIRTH, REG).unwrap() > s2);
     }
 
     #[test]
@@ -679,7 +702,7 @@ mod tests {
     fn lend_then_return() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         let loan = lib.lend(b, s, d(2026, 10, 1)).unwrap();
         assert!(lib.open_loan_for_book(b).is_some());
         assert_eq!(lib.return_book(b, d(2026, 10, 8)), Ok(loan));
@@ -695,7 +718,7 @@ mod tests {
     fn return_cannot_precede_loan() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         lib.lend(b, s, d(2026, 10, 10)).unwrap();
         assert_eq!(
             lib.return_book(b, d(2026, 10, 9)),
@@ -708,8 +731,8 @@ mod tests {
     fn cannot_lend_twice() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s1 = lib.add_student("Martin", "Léa", BIRTH).unwrap();
-        let s2 = lib.add_student("Durand", "Tom", BIRTH).unwrap();
+        let s1 = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        let s2 = lib.add_student("Durand", "Tom", BIRTH, REG).unwrap();
         lib.lend(b, s1, d(2026, 10, 1)).unwrap();
         assert_eq!(
             lib.lend(b, s2, d(2026, 10, 2)),
@@ -718,31 +741,34 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_archived_items_are_refused() {
+    fn unknown_archived_or_deleted_items_are_refused() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         assert_eq!(lib.lend(99, s, d(2026, 10, 1)), Err(Error::BookNotFound(99)));
         assert_eq!(lib.lend(b, 99, d(2026, 10, 1)), Err(Error::StudentNotFound(99)));
         lib.archive_book(b).unwrap();
         assert_eq!(lib.lend(b, s, d(2026, 10, 1)), Err(Error::BookArchived(b)));
         lib.unarchive_book(b).unwrap();
-        lib.archive_student(s).unwrap();
+        lib.delete_student(s).unwrap();
         assert_eq!(
             lib.lend(b, s, d(2026, 10, 1)),
-            Err(Error::StudentArchived(s))
+            Err(Error::StudentNotFound(s))
         );
     }
 
     #[test]
-    fn archiving_is_blocked_while_on_loan() {
+    fn archive_and_delete_are_blocked_while_on_loan() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        let other = lib.add_student("Durand", "Tom", BIRTH, REG).unwrap();
+        lib.lend(b, other, d(2026, 9, 1)).unwrap();
+        lib.return_book(b, d(2026, 9, 8)).unwrap();
         lib.lend(b, s, d(2026, 10, 1)).unwrap();
         assert_eq!(lib.archive_book(b), Err(Error::BookOnLoan(b)));
         assert_eq!(
-            lib.archive_student(s),
+            lib.delete_student(s),
             Err(Error::StudentHasLoans {
                 student: s,
                 count: 1
@@ -750,33 +776,34 @@ mod tests {
         );
         lib.return_book(b, d(2026, 10, 2)).unwrap();
         assert_eq!(lib.archive_book(b), Ok(()));
-        assert_eq!(lib.archive_student(s), Ok(()));
-        // l'historique est conservé
-        assert_eq!(lib.loans_of_student(s).len(), 1);
+        assert_eq!(lib.delete_student(s), Ok(()));
+        // l'élève et ses prêts sont effacés, pas ceux des autres
+        assert!(lib.student(s).is_none());
+        assert!(lib.loans_of_student(s).is_empty());
+        assert_eq!(lib.loans_of_student(other).len(), 1);
+        assert_eq!(lib.delete_student(s), Err(Error::StudentNotFound(s)));
     }
 
     #[test]
     fn duplicate_student_names_are_refused() {
         let mut lib = Library::new();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         assert!(matches!(
-            lib.add_student("  martin ", "LÉA", BIRTH),
+            lib.add_student("  martin ", "LÉA", BIRTH, REG),
             Err(Error::DuplicateStudent { .. })
         ));
         // se renommer soi-même avec le même nom reste permis
         assert_eq!(lib.update_student(s, "Martin", "Léa", BIRTH), Ok(()));
-        // un élève archivé libère son nom
-        lib.archive_student(s).unwrap();
-        let s2 = lib.add_student("Martin", "Léa", BIRTH).unwrap();
-        // ... et on ne peut pas le désarchiver tant que le nom est pris
-        assert!(matches!(
-            lib.unarchive_student(s),
-            Err(Error::DuplicateStudent { .. })
-        ));
+        // un élève supprimé libère son nom
+        lib.delete_student(s).unwrap();
+        let s2 = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         assert_ne!(s, s2);
-        assert_eq!(lib.add_student("", "Léa", BIRTH), Err(Error::EmptyLastName));
         assert_eq!(
-            lib.add_student("Durand", " ", BIRTH),
+            lib.add_student("", "Léa", BIRTH, REG),
+            Err(Error::EmptyLastName)
+        );
+        assert_eq!(
+            lib.add_student("Durand", " ", BIRTH, REG),
             Err(Error::EmptyFirstName)
         );
     }
@@ -784,23 +811,70 @@ mod tests {
     #[test]
     fn duplicate_check_ignores_accents() {
         let mut lib = Library::new();
-        lib.add_student("Lefèvre", "Léa", BIRTH).unwrap();
+        lib.add_student("Lefèvre", "Léa", BIRTH, REG).unwrap();
         assert!(matches!(
-            lib.add_student("LEFEVRE", "Lea", BIRTH),
+            lib.add_student("LEFEVRE", "Lea", BIRTH, REG),
             Err(Error::DuplicateStudent { .. })
         ));
         assert!(matches!(
-            lib.add_student("lefevre", "léa", BIRTH),
+            lib.add_student("lefevre", "léa", BIRTH, REG),
             Err(Error::DuplicateStudent { .. })
         ));
         assert_eq!(lib.students().len(), 1);
     }
 
     #[test]
+    fn registration_date_is_kept_and_old_files_load() {
+        let mut lib = Library::new();
+        let id = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        assert_eq!(lib.student(id).unwrap().registered_on, Some(REG));
+        let json = r#"{"students":[{"id":1,"last_name":"A","first_name":"B","birth_date":"2017-01-02"}]}"#;
+        let old: Library = serde_json::from_str(json).unwrap();
+        assert_eq!(old.student(1).unwrap().registered_on, None);
+    }
+
+    #[test]
+    fn registered_on_or_before_skips_unknown_dates() {
+        // élève 1 : enregistré avant que Biblo ne garde la date d'inscription
+        let json = r#"{"next_student_id":2,"students":[
+            {"id":1,"last_name":"Z","first_name":"Z","birth_date":"2015-01-02"}]}"#;
+        let mut lib: Library = serde_json::from_str(json).unwrap();
+        lib.after_load().unwrap();
+        let old = lib.add_student("A", "A", BIRTH, d(2020, 9, 1)).unwrap();
+        let limit = lib.add_student("B", "B", BIRTH, d(2022, 10, 11)).unwrap();
+        lib.add_student("C", "C", BIRTH, d(2022, 10, 12)).unwrap();
+        assert_eq!(
+            lib.registered_on_or_before(d(2022, 10, 11)),
+            vec![old, limit]
+        );
+    }
+
+    #[test]
+    fn batch_delete_keeps_pupils_who_still_have_a_book() {
+        let mut lib = Library::new();
+        let b = lib.add_book(book("A")).unwrap();
+        let s1 = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        let s2 = lib.add_student("Durand", "Tom", BIRTH, REG).unwrap();
+        let s3 = lib.add_student("Petit", "Lucas", BIRTH, REG).unwrap();
+        lib.lend(b, s2, d(2026, 10, 1)).unwrap();
+        let report = lib.delete_students(&[s1, s2, s3, 99]);
+        assert_eq!(report.deleted, vec![s1, s3]);
+        assert_eq!(report.kept_with_books, vec![s2]);
+        assert!(lib.student(s1).is_none());
+        assert!(lib.student(s2).is_some());
+        // déjà supprimé : rien à faire
+        assert_eq!(lib.delete_students(&[s1]), DeleteReport::default());
+    }
+
+    #[test]
     fn same_name_with_other_birth_date_is_another_student() {
         let mut lib = Library::new();
-        let a = lib.add_student("Martin", "Léa", d(2017, 5, 14)).unwrap();
-        let b = lib.add_student("MARTIN", "léa", d(2018, 1, 2)).unwrap();
+        let a = lib
+            .add_student("Martin", "Léa", d(2017, 5, 14), REG)
+            .unwrap();
+        let b = lib
+            .add_student("MARTIN", "léa", d(2018, 1, 2), REG)
+            .unwrap();
         assert_ne!(a, b);
         // changer la date de b pour celle de a : doublon
         assert!(matches!(
@@ -814,7 +888,7 @@ mod tests {
     fn overdue_threshold_and_order() {
         let today = d(2026, 10, 10);
         let mut lib = Library::new();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         let b1 = lib.add_book(book("B1")).unwrap();
         let b2 = lib.add_book(book("B2")).unwrap();
         let b3 = lib.add_book(book("B3")).unwrap();
@@ -837,7 +911,7 @@ mod tests {
     fn edit_loan_rules() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         let loan1 = lib.lend(b, s, d(2026, 10, 1)).unwrap();
         lib.return_book(b, d(2026, 10, 5)).unwrap();
         let _loan2 = lib.lend(b, s, d(2026, 10, 6)).unwrap();
@@ -870,7 +944,7 @@ mod tests {
     fn cancel_loan_frees_the_book() {
         let mut lib = Library::new();
         let b = lib.add_book(book("A")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         let loan = lib.lend(b, s, d(2026, 10, 1)).unwrap();
         assert_eq!(lib.cancel_loan(loan), Ok(()));
         assert!(lib.open_loan_for_book(b).is_none());
@@ -882,7 +956,7 @@ mod tests {
         let mut lib = Library::new();
         let b1 = lib.add_book(book("A")).unwrap();
         let b2 = lib.add_book(book("B")).unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         lib.lend(b1, s, d(2026, 10, 1)).unwrap();
         let map = lib.open_loans_by_book();
         assert!(map.contains_key(&b1));
@@ -899,7 +973,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let s = lib.add_student("Martin", "Léa", BIRTH).unwrap();
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
         lib.lend(b, s, d(2026, 10, 1)).unwrap();
         let json = serde_json::to_string_pretty(&lib).unwrap();
         // les dates sont lisibles dans le fichier
