@@ -38,8 +38,8 @@ impl BooksView {
             ui.label("Rechercher :");
             ui.add(
                 egui::TextEdit::singleline(&mut self.query)
-                    .hint_text("titre, auteur, collection, année, ISBN, code, élève…")
-                    .desired_width(360.0),
+                    .hint_text("titre, auteur, collection, catégorie, année, ISBN, code, élève…")
+                    .desired_width(420.0),
             );
             if ui.button("Effacer").clicked() {
                 self.query.clear();
@@ -79,6 +79,7 @@ impl BooksView {
                     &book.title,
                     &book.author,
                     &book.collection,
+                    &book.category,
                     &row.year,
                     &book.isbn,
                     status,
@@ -108,11 +109,12 @@ impl BooksView {
             .resizable(true)
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::auto())
-            .column(Column::initial(300.0).at_least(80.0).clip(true))
-            .column(Column::initial(170.0).at_least(60.0).clip(true))
-            .column(Column::initial(130.0).at_least(60.0).clip(true))
+            .column(Column::initial(260.0).at_least(80.0).clip(true))
+            .column(Column::initial(160.0).at_least(60.0).clip(true))
+            .column(Column::initial(120.0).at_least(60.0).clip(true))
+            .column(Column::initial(110.0).at_least(60.0).clip(true))
             .column(Column::auto())
-            .column(Column::initial(130.0).at_least(60.0).clip(true))
+            .column(Column::initial(110.0).at_least(60.0).clip(true))
             .column(Column::remainder().at_least(100.0).clip(true))
             .header(22.0, |mut header| {
                 for title in [
@@ -120,6 +122,7 @@ impl BooksView {
                     "Titre",
                     "Auteur",
                     "Collection",
+                    "Catégorie",
                     "Année",
                     "ISBN",
                     "Statut",
@@ -135,7 +138,12 @@ impl BooksView {
                     table_row.col(|ui| {
                         ui.monospace(&row.code);
                     });
-                    for text in [&row.book.title, &row.book.author, &row.book.collection] {
+                    for text in [
+                        &row.book.title,
+                        &row.book.author,
+                        &row.book.collection,
+                        &row.book.category,
+                    ] {
                         table_row.col(|ui| {
                             ui.label(text);
                         });

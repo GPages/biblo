@@ -31,6 +31,8 @@ pub struct BookInput {
     pub title: String,
     pub author: String,
     pub collection: String,
+    /// Texte libre (« Roman », « BD », « Documentaire »…).
+    pub category: String,
     /// Année de parution (stricte : 4 chiffres, `MIN_YEAR..=MAX_YEAR`).
     pub year: Option<i32>,
     pub isbn: String,
@@ -52,6 +54,7 @@ impl BookInput {
             title,
             author: clean_text(&self.author),
             collection: clean_text(&self.collection),
+            category: clean_text(&self.category),
             year: self.year,
             isbn: clean_text(&self.isbn),
         })
@@ -66,6 +69,8 @@ pub struct Book {
     pub author: String,
     #[serde(default)]
     pub collection: String,
+    #[serde(default)]
+    pub category: String,
     #[serde(default)]
     pub year: Option<i32>,
     #[serde(default)]
@@ -211,6 +216,7 @@ impl Library {
                 title: input.title,
                 author: input.author,
                 collection: input.collection,
+                category: input.category,
                 year: input.year,
                 isbn: input.isbn,
                 archived: false,
@@ -235,6 +241,7 @@ impl Library {
         book.title = clean.title;
         book.author = clean.author;
         book.collection = clean.collection;
+        book.category = clean.category;
         book.year = clean.year;
         book.isbn = clean.isbn;
         Ok(())
@@ -464,6 +471,20 @@ impl Library {
     }
 
     // ------------------------------------------------------------ requêtes
+
+    /// Catégories déjà utilisées (livres non archivés), sans doublon de casse
+    /// ni d'accents (la première orthographe rencontrée l'emporte), triées.
+    pub fn categories(&self) -> Vec<String> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for b in self.books.iter().filter(|b| !b.archived && !b.category.is_empty()) {
+            let key = fold(&b.category);
+            if !seen.iter().any(|(k, _)| *k == key) {
+                seen.push((key, b.category.clone()));
+            }
+        }
+        seen.sort();
+        seen.into_iter().map(|(_, c)| c).collect()
+    }
 
     pub fn open_loan_for_book(&self, book_id: u32) -> Option<&Loan> {
         self.loans
@@ -824,6 +845,50 @@ mod tests {
         assert!(json.contains("2026-10-01"));
         let back: Library = serde_json::from_str(&json).unwrap();
         assert_eq!(back, lib);
+    }
+
+    #[test]
+    fn category_is_cleaned_stored_and_updated() {
+        let mut lib = Library::new();
+        let id = lib
+            .add_book(BookInput {
+                title: "Tintin au Tibet".into(),
+                category: "  Bande   dessinée ".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(lib.book(id).unwrap().category, "Bande dessinée");
+        let mut input = book("Tintin au Tibet");
+        input.category = "BD".into();
+        lib.update_book(id, &input).unwrap();
+        assert_eq!(lib.book(id).unwrap().category, "BD");
+    }
+
+    #[test]
+    fn file_without_category_still_loads() {
+        let json = r#"{"version":1,"books":[{"id":1,"title":"X","collection":"Folio"}]}"#;
+        let lib: Library = serde_json::from_str(json).unwrap();
+        assert_eq!(lib.book(1).unwrap().category, "");
+    }
+
+    #[test]
+    fn categories_are_distinct_and_sorted() {
+        let mut lib = Library::new();
+        for (title, category) in [
+            ("A", "Roman"),
+            ("B", "bd"),
+            ("C", "Documentaire"),
+            ("D", "ROMAN"),
+            ("E", ""),
+            ("F", "Bd"),
+            ("G", "Écologie"),
+        ] {
+            let mut input = book(title);
+            input.category = category.into();
+            lib.add_book(input).unwrap();
+        }
+        // the first spelling wins; accents and case are ignored for sorting and duplicates
+        assert_eq!(lib.categories(), vec!["bd", "Documentaire", "Écologie", "Roman"]);
     }
 
     #[test]

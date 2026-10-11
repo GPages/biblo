@@ -17,6 +17,7 @@ pub struct RegisterView {
     title: String,
     author: String,
     collection: String,
+    category: String,
     year: String,
     isbn: String,
     copies: usize,
@@ -41,6 +42,7 @@ impl Default for RegisterView {
             title: String::new(),
             author: String::new(),
             collection: String::new(),
+            category: String::new(),
             year: String::new(),
             isbn: String::new(),
             copies: 1,
@@ -112,6 +114,29 @@ impl RegisterView {
                     ui.add(egui::TextEdit::singleline(value).desired_width(320.0));
                     ui.end_row();
                 }
+                ui.label("Catégorie");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.category)
+                            .hint_text("Roman, BD, Album…")
+                            .desired_width(200.0),
+                    );
+                    // Picking an existing category keeps the spelling consistent.
+                    let categories = store.lib().categories();
+                    if !categories.is_empty() {
+                        egui::ComboBox::from_id_salt("category_pick")
+                            .selected_text("Choisir…")
+                            .show_ui(ui, |ui| {
+                                for c in categories {
+                                    let current = fold(&c) == fold(&self.category);
+                                    if ui.selectable_label(current, &c).clicked() {
+                                        self.category = c;
+                                    }
+                                }
+                            });
+                    }
+                });
+                ui.end_row();
                 ui.label("Année de parution");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.year)
@@ -153,6 +178,7 @@ impl RegisterView {
             title: self.title.clone(),
             author: self.author.clone(),
             collection: self.collection.clone(),
+            category: self.category.clone(),
             year,
             isbn: self.isbn.clone(),
         };
@@ -164,6 +190,7 @@ impl RegisterView {
                     &mut self.title,
                     &mut self.author,
                     &mut self.collection,
+                    &mut self.category,
                     &mut self.year,
                     &mut self.isbn,
                 ] {
