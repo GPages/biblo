@@ -1,4 +1,5 @@
-//! Second view: register books and pupils, and print their barcodes.
+//! "Enregistrer" tab: register books and pupils, and print their barcodes.
+//! Books and pupils each have their own screen, so the lists get room.
 
 use std::path::Path;
 
@@ -12,7 +13,15 @@ use egui_extras::{Column, TableBuilder};
 use super::print_queue::PrintQueue;
 use super::{text_with_choices, theme, Message};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Books,
+    Students,
+}
+
 pub struct RegisterView {
+    section: Section,
+
     // New book form.
     title: String,
     author: String,
@@ -40,6 +49,7 @@ pub struct RegisterView {
 impl Default for RegisterView {
     fn default() -> Self {
         RegisterView {
+            section: Section::Books,
             title: String::new(),
             author: String::new(),
             collection: String::new(),
@@ -61,32 +71,44 @@ impl Default for RegisterView {
     }
 }
 
+/// A column with one scrollbar, as tall as the window. Plain top-down
+/// layout: `columns` would stretch buttons and justify text.
+fn scroll_column(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::vertical().id_salt(id).show(ui, |ui| {
+        ui.with_layout(Layout::top_down(Align::Min), add);
+    });
+}
+
 impl RegisterView {
     pub fn ui(&mut self, ui: &mut egui::Ui, store: &mut Store, data_dir: &Path) {
-        // Plain top-down layout: `columns` would stretch buttons and justify text.
-        let plain = Layout::top_down(Align::Min);
-        ui.columns(2, |cols| {
-            egui::ScrollArea::vertical()
-                .id_salt("books_column")
-                .show(&mut cols[0], |ui| {
-                    ui.with_layout(plain, |ui| {
-                        theme::card(ui, |ui| self.book_form(ui, store));
-                        ui.add_space(14.0);
-                        theme::card(ui, |ui| self.book_labels.ui(ui, store.lib(), data_dir));
-                    });
-                });
-            egui::ScrollArea::vertical()
-                .id_salt("students_column")
-                .show(&mut cols[1], |ui| {
-                    ui.with_layout(plain, |ui| {
-                        theme::card(ui, |ui| self.student_form(ui, store));
-                        ui.add_space(14.0);
-                        theme::card(ui, |ui| self.student_cards.ui(ui, store.lib(), data_dir));
-                        ui.add_space(14.0);
-                        theme::card(ui, |ui| self.student_list(ui, store));
-                    });
-                });
+        ui.horizontal(|ui| {
+            let section = &mut self.section;
+            ui.selectable_value(section, Section::Books, "📖 Enregistrer des livres");
+            ui.selectable_value(section, Section::Students, "🎒 Enregistrer des élèves");
         });
+        ui.add_space(8.0);
+        match self.section {
+            Section::Books => ui.columns(2, |cols| {
+                scroll_column(&mut cols[0], "book_form_column", |ui| {
+                    theme::card(ui, |ui| self.book_form(ui, store));
+                });
+                scroll_column(&mut cols[1], "book_labels_column", |ui| {
+                    theme::card(ui, |ui| self.book_labels.ui(ui, store.lib(), data_dir));
+                });
+            }),
+            Section::Students => ui.columns(2, |cols| {
+                scroll_column(&mut cols[0], "student_form_column", |ui| {
+                    theme::card(ui, |ui| self.student_form(ui, store));
+                    ui.add_space(14.0);
+                    theme::card(ui, |ui| self.student_cards.ui(ui, store.lib(), data_dir));
+                });
+                // No scroll area around the list: its table scrolls by itself,
+                // using the whole height of the window.
+                cols[1].with_layout(Layout::top_down(Align::Min), |ui| {
+                    theme::card(ui, |ui| self.student_list(ui, store));
+                });
+            }),
+        }
     }
 
     // ------------------------------------------------------------ books

@@ -165,33 +165,27 @@ impl PrintQueue {
         }
         ui.add_space(6.0);
 
+        // No scroll area of its own: the column around it scrolls, so there
+        // is a single scrollbar.
         let mut remove = None;
-        egui::ScrollArea::vertical()
-            .id_salt(t.file_prefix)
-            .max_height(320.0)
-            // Inside the scrolling column it would otherwise shrink to a
-            // single card when it starts near the bottom of the window.
-            .min_scrolled_height(240.0)
-            .show(ui, |ui| {
-                for (i, &id) in self.ids.iter().enumerate() {
-                    let Some(label) = self.label(lib, id) else {
-                        continue;
-                    };
+        for (i, &id) in self.ids.iter().enumerate() {
+            let Some(label) = self.label(lib, id) else {
+                continue;
+            };
+            ui.horizontal(|ui| {
+                barcode(ui, &label.code, 2.0, 40.0);
+                ui.vertical(|ui| {
+                    // The button sits next to the code so it never covers the caption.
                     ui.horizontal(|ui| {
-                        barcode(ui, &label.code, 2.0, 40.0);
-                        ui.vertical(|ui| {
-                            // The button sits next to the code so it never covers the caption.
-                            ui.horizontal(|ui| {
-                                ui.monospace(&label.code);
-                                if ui.small_button("Retirer").clicked() {
-                                    remove = Some(i);
-                                }
-                            });
-                            ui.label(&label.caption);
-                        });
+                        ui.monospace(&label.code);
+                        if ui.small_button("Retirer").clicked() {
+                            remove = Some(i);
+                        }
                     });
-                }
+                    ui.label(&label.caption);
+                });
             });
+        }
         if let Some(i) = remove {
             self.ids.remove(i);
         }
