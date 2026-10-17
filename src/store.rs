@@ -137,8 +137,25 @@ fn write_data(dir: &Path, bytes: &[u8]) -> Result<(), Error> {
         f.write_all(bytes).map_err(io_err)?;
         f.sync_all().map_err(io_err)?;
     }
-    fs::rename(&tmp, &target).map_err(io_err)?;
-    Ok(())
+    rename_patiently(&tmp, &target).map_err(io_err)
+}
+
+/// Sous Windows, un antivirus, l'indexation ou OneDrive gardent parfois le
+/// fichier ouvert un court instant juste après son écriture : le
+/// renommage échoue alors (« accès refusé »). On réessaie pendant un peu
+/// moins d'une seconde avant d'abandonner.
+fn rename_patiently(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u64 = 8;
+    let mut attempt = 1;
+    loop {
+        match fs::rename(from, to) {
+            Err(_) if attempt < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(25 * attempt));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Lit un fichier de données (`biblo.json` ou une sauvegarde) sans le modifier.

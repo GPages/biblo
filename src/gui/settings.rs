@@ -9,7 +9,7 @@ use biblo::Store;
 use chrono::{Datelike, Local, NaiveDate, Weekday};
 use eframe::egui::{self, Margin, RichText};
 
-use super::{theme, Message};
+use super::{open_file, theme, Message};
 
 /// One line of the list: a backup and what it holds.
 struct Row {
@@ -25,6 +25,7 @@ pub struct SettingsView {
     /// Backup whose restoration waits for a confirmation (index in `rows`).
     confirm: Option<usize>,
     message: Option<Message>,
+    folder_message: Option<Message>,
 }
 
 fn weekday(day: NaiveDate) -> &'static str {
@@ -127,8 +128,34 @@ impl SettingsView {
                 }
                 self.list(ui);
             });
+            ui.add_space(14.0);
+            theme::card(ui, |ui| self.folder(ui, data_dir));
         });
         restored
+    }
+
+    /// Where everything is, to copy it to a USB key or to send the log.
+    fn folder(&mut self, ui: &mut egui::Ui, data_dir: &Path) {
+        ui.heading("📁 Dossier des données");
+        ui.add_space(4.0);
+        ui.label(format!(
+            "Toutes les données de Biblo sont ici : {}",
+            data_dir.display()
+        ));
+        ui.label(format!(
+            "En cas de problème au démarrage, le fichier {} de ce dossier explique ce qui \
+             s'est passé : c'est lui qu'il faut transmettre.",
+            crate::journal::LOG_FILE
+        ));
+        ui.add_space(4.0);
+        if ui.button("📂 Ouvrir le dossier").clicked() {
+            self.folder_message = open_file(data_dir)
+                .err()
+                .map(|e| Message::Err(format!("Impossible d'ouvrir le dossier : {e}")));
+        }
+        if let Some(m) = &self.folder_message {
+            m.show(ui);
+        }
     }
 
     fn list(&mut self, ui: &mut egui::Ui) {

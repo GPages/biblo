@@ -35,12 +35,30 @@ pub struct App {
     late_days: i64,
     register: register::RegisterView,
     settings: settings::SettingsView,
+    /// Logged once: proof in `biblo.log` that the window really appeared.
+    shown: bool,
 }
 
 impl App {
     pub fn new(ctx: &egui::Context, data_dir: PathBuf) -> App {
         theme::apply(ctx);
         let store = Store::open(&data_dir, biblo::today()).map_err(|e| e.to_string());
+        crate::journal::line(match &store {
+            Ok(store) => {
+                let lib = store.lib();
+                let mut text = format!(
+                    "data opened: {} books, {} pupils, {} loans",
+                    lib.books().len(),
+                    lib.students().len(),
+                    lib.loans().len()
+                );
+                if let Some(e) = store.backup_error() {
+                    text.push_str(&format!(" (daily backup failed: {e})"));
+                }
+                text
+            }
+            Err(e) => format!("data unreadable: {e}"),
+        });
         App {
             data_dir,
             store,
@@ -51,6 +69,7 @@ impl App {
             late_days: 21,
             register: register::RegisterView::default(),
             settings: settings::SettingsView::default(),
+            shown: false,
         }
     }
 
@@ -66,6 +85,9 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !std::mem::replace(&mut self.shown, true) {
+            crate::journal::line("window shown");
+        }
         egui::Panel::top("header")
             .frame(
                 egui::Frame::new()
