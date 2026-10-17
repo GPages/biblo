@@ -153,11 +153,17 @@ fn main() -> ExitCode {
     #[cfg(feature = "demo")]
     seed_demo(&data_dir);
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(TITLE)
+        .with_inner_size([1200.0, 760.0])
+        .with_min_inner_size([800.0, 500.0]);
+    // Title bar and taskbar (the .exe gets the same icon from build.rs).
+    match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/biblo.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => journal::line(format!("window icon not loaded: {e}")),
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(TITLE)
-            .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([800.0, 500.0]),
+        viewport,
         wgpu_options: wgpu_options(),
         ..Default::default()
     };

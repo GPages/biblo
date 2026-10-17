@@ -13,6 +13,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 eframe = "0.36.2"
 egui_extras = { version = "0.36", default-features = false }
 
+# Shown in the properties of the Windows .exe (see build.rs).
+[package.metadata.winresource]
+ProductName = "Biblo"
+FileDescription = "Biblo, la bibliothèque de l’école"
+LegalCopyright = "Licence 0BSD"
+
 [profile.release]
 # Smaller .exe: no debug symbols.
 strip = true
@@ -20,3 +26,6 @@ strip = true
 [features]
 # Demonstration build: the first start fills an empty data folder with sample data.
 demo = []
+
+[build-dependencies]
+winresource = "0.1.34"
