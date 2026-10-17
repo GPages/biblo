@@ -1,103 +1,87 @@
-//! Loan desk: decides what one scan (or typed entry) means. Pure: nothing is
-//! modified here, the screen applies the decision through `Store::apply`.
+//! Loan desk: what an entry means, and what can be done with the pupil and
+//! the book chosen on the screen. Pure: nothing is modified here, the screen
+//! applies the choice through `Store::apply`.
 //!
-//! Lending and returning are two separate modes, so the same scan never
-//! means "lend" in one case and "return" in another: in lend mode a book
-//! can only be lent, in return mode it can only be taken back.
+//! The screen has a pupil field and a book field, side by side. A scanned
+//! code goes where it belongs whatever the field (`E…` to the pupil, `L…` to
+//! the book); a bare number or a name is read for the field it was typed in.
 
-use crate::codes::{parse_code_or_number, student_code, Kind, Scanned};
+use crate::codes::{book_code, parse_code_or_number, student_code, Kind, Scanned};
 use crate::dates::format_date;
 use crate::error::Error;
 use crate::library::Library;
 use crate::search::{fold, Query};
 
-/// What a scan means in lend mode.
+/// The field an entry was typed or scanned into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Student,
+    Book,
+}
+
+/// What one entry means.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LendDecision {
+pub enum Entry {
     /// Empty entry.
     Nothing,
-    /// A pupil card: this pupil now borrows.
-    SelectStudent(u32),
-    /// A free book while a pupil is selected.
-    Lend { book: u32, student: u32 },
-    /// A book that is on loan: it must be returned (return mode) first.
-    AlreadyLent { book: u32, loan: u32 },
-    /// A free book, but no pupil selected yet.
-    NeedStudent { book: u32 },
-    /// Not a code: look for pupils by name.
-    SearchName(String),
+    /// A known pupil (card scanned, code or number typed).
+    Student(u32),
+    /// A known book that is still in the catalogue.
+    Book(u32),
+    /// Not a code: a pupil's name or a book's title to look for.
+    Search(Field, String),
     /// Unknown pupil, or unknown or archived book.
     Refused(Error),
 }
 
-/// What a scan means in return mode.
+/// What can be done with the chosen pupil and book.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReturnDecision {
-    /// Empty entry.
-    Nothing,
-    /// A book on loan: record its return.
-    Return { book: u32, loan: u32 },
-    /// A book that is not on loan: nothing to return.
-    NotLent { book: u32 },
-    /// A pupil card: returns only take books.
-    StudentCard(u32),
-    /// Neither a code nor a number.
-    NotACode(String),
-    /// Unknown or archived book.
-    Refused(Error),
+pub enum Proposal {
+    /// The pupil, the book, or both, are still missing.
+    Incomplete,
+    /// A free book and a pupil: the loan can be recorded.
+    Lend { student: u32, book: u32 },
+    /// The book is out: it cannot be lent to anyone, only returned.
+    Return { book: u32, loan: u32, borrower: u32 },
 }
 
-/// Lend mode. `student`: the pupil currently selected. A bare number means a
-/// pupil when none is selected, and a book once a pupil is selected.
-pub fn decide_lend(lib: &Library, student: Option<u32>, input: &str) -> LendDecision {
+pub fn read_entry(lib: &Library, field: Field, input: &str) -> Entry {
     let text = input.trim();
     if text.is_empty() {
-        return LendDecision::Nothing;
+        return Entry::Nothing;
     }
-    let expected = if student.is_some() {
-        Kind::Book
-    } else {
-        Kind::Student
+    let expected = match field {
+        Field::Student => Kind::Student,
+        Field::Book => Kind::Book,
     };
     match parse_code_or_number(text, expected) {
-        None => LendDecision::SearchName(text.to_string()),
+        None => Entry::Search(field, text.to_string()),
         Some(Scanned::Student(id)) => match lib.student(id) {
-            None => LendDecision::Refused(Error::StudentNotFound(id)),
-            Some(_) => LendDecision::SelectStudent(id),
+            None => Entry::Refused(Error::StudentNotFound(id)),
+            Some(_) => Entry::Student(id),
         },
         Some(Scanned::Book(id)) => match lib.book(id) {
-            None => LendDecision::Refused(Error::BookNotFound(id)),
-            Some(b) if b.archived => LendDecision::Refused(Error::BookArchived(id)),
-            Some(_) => match (lib.open_loan_for_book(id), student) {
-                (Some(loan), _) => LendDecision::AlreadyLent {
-                    book: id,
-                    loan: loan.id,
-                },
-                (None, Some(student)) => LendDecision::Lend { book: id, student },
-                (None, None) => LendDecision::NeedStudent { book: id },
-            },
+            None => Entry::Refused(Error::BookNotFound(id)),
+            Some(b) if b.archived => Entry::Refused(Error::BookArchived(id)),
+            Some(_) => Entry::Book(id),
         },
     }
 }
 
-/// Return mode: only books are expected, so a bare number is a book.
-pub fn decide_return(lib: &Library, input: &str) -> ReturnDecision {
-    let text = input.trim();
-    if text.is_empty() {
-        return ReturnDecision::Nothing;
+pub fn propose(lib: &Library, student: Option<u32>, book: Option<u32>) -> Proposal {
+    let Some(book) = book.filter(|&id| lib.book(id).is_some()) else {
+        return Proposal::Incomplete;
+    };
+    if let Some(loan) = lib.open_loan_for_book(book) {
+        return Proposal::Return {
+            book,
+            loan: loan.id,
+            borrower: loan.student_id,
+        };
     }
-    match parse_code_or_number(text, Kind::Book) {
-        None => ReturnDecision::NotACode(text.to_string()),
-        Some(Scanned::Student(id)) => ReturnDecision::StudentCard(id),
-        Some(Scanned::Book(id)) => match (lib.book(id), lib.open_loan_for_book(id)) {
-            (None, _) => ReturnDecision::Refused(Error::BookNotFound(id)),
-            (Some(_), Some(loan)) => ReturnDecision::Return {
-                book: id,
-                loan: loan.id,
-            },
-            (Some(b), None) if b.archived => ReturnDecision::Refused(Error::BookArchived(id)),
-            (Some(_), None) => ReturnDecision::NotLent { book: id },
-        },
+    match student.filter(|&id| lib.student(id).is_some()) {
+        Some(student) => Proposal::Lend { student, book },
+        None => Proposal::Incomplete,
     }
 }
 
@@ -122,6 +106,27 @@ pub fn find_students(lib: &Library, text: &str) -> Vec<u32> {
     found.into_iter().map(|(_, id)| id).collect()
 }
 
+/// Books still in the catalogue matching `text` (title, author, collection,
+/// category or code), sorted by title; each copy is listed on its own.
+pub fn find_books(lib: &Library, text: &str) -> Vec<u32> {
+    let query = Query::new(text);
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut found: Vec<(String, u32)> = lib
+        .books()
+        .iter()
+        .filter(|b| !b.archived)
+        .filter(|b| {
+            let code = book_code(b.id);
+            query.matches(&[&b.title, &b.author, &b.collection, &b.category, &code])
+        })
+        .map(|b| (fold(&b.title), b.id))
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, id)| id).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,7 +137,8 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
-    /// Books 1 and 2, pupils 1 (Martin Léa) and 2 (Durand Tom); book 2 is lent to Tom.
+    /// Books 1 (Matilda) and 2 (Tintin), pupils 1 (Martin Léa) and
+    /// 2 (Durand Tom); book 2 is lent to Tom.
     fn library() -> Library {
         let mut lib = Library::new();
         for title in ["Matilda", "Tintin"] {
@@ -151,140 +157,116 @@ mod tests {
     }
 
     #[test]
-    fn pupil_card_selects_the_pupil() {
+    fn scanned_codes_go_to_their_side_whatever_the_field() {
         let lib = library();
-        assert_eq!(
-            decide_lend(&lib, None, "E000001"),
-            LendDecision::SelectStudent(1)
-        );
-        // another card replaces the current pupil
-        assert_eq!(
-            decide_lend(&lib, Some(1), "e2"),
-            LendDecision::SelectStudent(2)
-        );
-        // a bare number is a pupil when none is selected
-        assert_eq!(decide_lend(&lib, None, "1"), LendDecision::SelectStudent(1));
+        for field in [Field::Student, Field::Book] {
+            assert_eq!(read_entry(&lib, field, "E000001"), Entry::Student(1));
+            assert_eq!(read_entry(&lib, field, "l2\r\n"), Entry::Book(2));
+        }
     }
 
     #[test]
-    fn free_book_is_lent_to_the_selected_pupil() {
+    fn numbers_and_names_are_read_for_their_field() {
         let lib = library();
+        assert_eq!(read_entry(&lib, Field::Student, " 1 "), Entry::Student(1));
+        assert_eq!(read_entry(&lib, Field::Book, " 1 "), Entry::Book(1));
         assert_eq!(
-            decide_lend(&lib, Some(1), "L000001"),
-            LendDecision::Lend {
-                book: 1,
-                student: 1
-            }
-        );
-        // a bare number is a book once a pupil is selected
-        assert_eq!(
-            decide_lend(&lib, Some(1), " 1\r\n"),
-            LendDecision::Lend {
-                book: 1,
-                student: 1
-            }
+            read_entry(&lib, Field::Student, "Léa"),
+            Entry::Search(Field::Student, "Léa".into())
         );
         assert_eq!(
-            decide_lend(&lib, None, "L1"),
-            LendDecision::NeedStudent { book: 1 }
+            read_entry(&lib, Field::Book, " matilda "),
+            Entry::Search(Field::Book, "matilda".into())
         );
-    }
-
-    #[test]
-    fn lend_mode_never_returns_a_book() {
-        let lib = library();
-        let loan = lib.open_loan_for_book(2).unwrap().id;
-        let expected = LendDecision::AlreadyLent { book: 2, loan };
-        assert_eq!(decide_lend(&lib, None, "L000002"), expected);
-        assert_eq!(decide_lend(&lib, Some(1), "L000002"), expected);
-    }
-
-    #[test]
-    fn return_mode_takes_back_books_only() {
-        let lib = library();
-        let loan = lib.open_loan_for_book(2).unwrap().id;
-        let expected = ReturnDecision::Return { book: 2, loan };
-        assert_eq!(decide_return(&lib, "L000002"), expected);
-        // a bare number is always a book here
-        assert_eq!(decide_return(&lib, " 2\r\n"), expected);
-        // book 1 is on the shelf: nothing to return
-        assert_eq!(
-            decide_return(&lib, "L1"),
-            ReturnDecision::NotLent { book: 1 }
-        );
-        assert_eq!(
-            decide_return(&lib, "E000001"),
-            ReturnDecision::StudentCard(1)
-        );
-        assert_eq!(
-            decide_return(&lib, "Léa"),
-            ReturnDecision::NotACode("Léa".into())
-        );
-        assert_eq!(decide_return(&lib, "  "), ReturnDecision::Nothing);
+        assert_eq!(read_entry(&lib, Field::Book, "  "), Entry::Nothing);
     }
 
     #[test]
     fn azerty_scan_is_understood() {
         let lib = library();
         // L000001 typed by a US-layout scanner on an AZERTY Windows
-        assert_eq!(
-            decide_lend(&lib, Some(1), "Lààààà&"),
-            LendDecision::Lend {
-                book: 1,
-                student: 1
-            }
-        );
-        let loan = lib.open_loan_for_book(2).unwrap().id;
-        assert_eq!(
-            decide_return(&lib, "Làààààé"),
-            ReturnDecision::Return { book: 2, loan }
-        );
+        assert_eq!(read_entry(&lib, Field::Student, "Lààààà&"), Entry::Book(1));
     }
 
     #[test]
     fn unknown_or_archived_items_are_refused() {
         let mut lib = library();
         assert_eq!(
-            decide_lend(&lib, None, "E99"),
-            LendDecision::Refused(Error::StudentNotFound(99))
+            read_entry(&lib, Field::Student, "E99"),
+            Entry::Refused(Error::StudentNotFound(99))
         );
         assert_eq!(
-            decide_lend(&lib, Some(1), "L99"),
-            LendDecision::Refused(Error::BookNotFound(99))
-        );
-        assert_eq!(
-            decide_return(&lib, "L99"),
-            ReturnDecision::Refused(Error::BookNotFound(99))
+            read_entry(&lib, Field::Book, "99"),
+            Entry::Refused(Error::BookNotFound(99))
         );
         lib.archive_book(1).unwrap();
         assert_eq!(
-            decide_lend(&lib, Some(1), "L1"),
-            LendDecision::Refused(Error::BookArchived(1))
-        );
-        assert_eq!(
-            decide_return(&lib, "L1"),
-            ReturnDecision::Refused(Error::BookArchived(1))
+            read_entry(&lib, Field::Book, "L1"),
+            Entry::Refused(Error::BookArchived(1))
         );
         lib.delete_student(1).unwrap();
         assert_eq!(
-            decide_lend(&lib, None, "E1"),
-            LendDecision::Refused(Error::StudentNotFound(1))
+            read_entry(&lib, Field::Student, "E1"),
+            Entry::Refused(Error::StudentNotFound(1))
         );
     }
 
     #[test]
-    fn text_that_is_not_a_code_searches_by_name() {
+    fn a_free_book_and_a_pupil_make_a_loan() {
         let lib = library();
-        assert_eq!(decide_lend(&lib, None, "  "), LendDecision::Nothing);
         assert_eq!(
-            decide_lend(&lib, None, " martin "),
-            LendDecision::SearchName("martin".into())
+            propose(&lib, Some(1), Some(1)),
+            Proposal::Lend {
+                student: 1,
+                book: 1
+            }
         );
-        // starts like a code but is a name
-        assert_eq!(
-            decide_lend(&lib, None, "Léa"),
-            LendDecision::SearchName("Léa".into())
-        );
+        assert_eq!(propose(&lib, Some(1), None), Proposal::Incomplete);
+        assert_eq!(propose(&lib, None, Some(1)), Proposal::Incomplete);
+        assert_eq!(propose(&lib, None, None), Proposal::Incomplete);
+        // a pupil deleted in the meantime
+        assert_eq!(propose(&lib, Some(99), Some(1)), Proposal::Incomplete);
+    }
+
+    #[test]
+    fn a_book_that_is_out_can_only_be_returned() {
+        let lib = library();
+        let loan = lib.open_loan_for_book(2).unwrap().id;
+        let back = Proposal::Return {
+            book: 2,
+            loan,
+            borrower: 2,
+        };
+        // whoever is chosen: nobody, another pupil, or the borrower
+        assert_eq!(propose(&lib, None, Some(2)), back);
+        assert_eq!(propose(&lib, Some(1), Some(2)), back);
+        assert_eq!(propose(&lib, Some(2), Some(2)), back);
+    }
+
+    #[test]
+    fn finds_books_by_title_author_or_code() {
+        let mut lib = library();
+        let copy = lib
+            .add_book(BookInput {
+                title: "Matilda".into(),
+                author: "Roald Dahl".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        lib.add_book(BookInput {
+            title: "Le Bon Gros Géant".into(),
+            author: "Roald Dahl".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        // every copy, sorted by title
+        assert_eq!(find_books(&lib, "matil"), vec![1, copy]);
+        assert_eq!(find_books(&lib, "dahl"), vec![4, copy]);
+        assert_eq!(find_books(&lib, "geant"), vec![4]);
+        assert_eq!(find_books(&lib, "L000002"), vec![2]);
+        assert!(find_books(&lib, "").is_empty());
+        lib.archive_book(1).unwrap();
+        assert_eq!(find_books(&lib, "matilda"), vec![copy]);
     }
 
     #[test]
