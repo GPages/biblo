@@ -6,7 +6,7 @@ use std::path::Path;
 use biblo::codes::{book_code, student_code, Kind};
 use biblo::dates::{format_date, parse_date, parse_year};
 use biblo::search::{fold, Query};
-use biblo::{BookInput, Store};
+use biblo::{BookInput, Library, Store};
 use eframe::egui::{self, Align, Layout, Margin, RichText};
 use egui_extras::{Column, TableBuilder};
 
@@ -30,6 +30,8 @@ pub struct RegisterView {
     year: String,
     isbn: String,
     copies: usize,
+    /// The author field is the one being filled in: its suggestions show.
+    author_active: bool,
     book_message: Option<Message>,
     focus_title: bool,
 
@@ -57,6 +59,7 @@ impl Default for RegisterView {
             year: String::new(),
             isbn: String::new(),
             copies: 1,
+            author_active: false,
             book_message: None,
             focus_title: false,
             book_labels: PrintQueue::new(Kind::Book),
@@ -127,14 +130,13 @@ impl RegisterView {
                     title.request_focus();
                 }
                 ui.end_row();
-                for (label, value) in [
-                    ("Auteur", &mut self.author),
-                    ("Collection", &mut self.collection),
-                ] {
-                    ui.label(label);
-                    ui.add(egui::TextEdit::singleline(value).desired_width(320.0));
-                    ui.end_row();
-                }
+                // Top-aligned: the suggestions make this row taller.
+                ui.with_layout(Layout::top_down(Align::Min), |ui| ui.label("Auteur"));
+                self.author_field(ui, store.lib());
+                ui.end_row();
+                ui.label("Collection");
+                ui.add(egui::TextEdit::singleline(&mut self.collection).desired_width(320.0));
+                ui.end_row();
                 ui.label("Catégorie");
                 ui.horizontal(|ui| {
                     ui.add(
@@ -260,6 +262,67 @@ impl RegisterView {
         }
         if let Some(m) = &self.book_message {
             m.show(ui);
+        }
+    }
+
+    /// The author field, with the authors already registered that match what
+    /// is typed: click one, or press Tab to complete with the first.
+    fn author_field(&mut self, ui: &mut egui::Ui, lib: &Library) {
+        let id = egui::Id::new("book_author");
+        let (suggestions, completion) = author_suggestions(&lib.authors(), &self.author);
+        ui.vertical(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.author)
+                    .id(id)
+                    .desired_width(320.0)
+                    // Tab only completes while there is something to complete;
+                    // otherwise it moves to the next field as usual.
+                    .lock_focus(completion.is_some()),
+            );
+            // Clicking a suggestion takes the focus away from the field: the
+            // list stays until another field gets the focus.
+            let focused = ui.memory(|m| m.focused());
+            if focused == Some(id) {
+                self.author_active = true;
+            } else if focused.is_some() {
+                self.author_active = false;
+            }
+            if let Some(full) = completion
+                .clone()
+                .filter(|_| field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Tab)))
+            {
+                self.set_author(ui.ctx(), id, full);
+                return;
+            }
+            if !self.author_active {
+                return;
+            }
+            let mut chosen = None;
+            for author in &suggestions {
+                if ui.small_button(author).clicked() {
+                    chosen = Some(author.clone());
+                }
+            }
+            if completion.is_some() {
+                ui.weak("Tab : compléter avec le premier");
+            }
+            if let Some(author) = chosen {
+                self.set_author(ui.ctx(), id, author);
+                self.author_active = false;
+            }
+        });
+    }
+
+    /// Fills the author field and puts the cursor at its end.
+    fn set_author(&mut self, ctx: &egui::Context, id: egui::Id, author: String) {
+        let end = author.chars().count();
+        self.author = author;
+        if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+            let cursor = egui::text::CCursor::new(end);
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+            egui::TextEdit::store_state(ctx, id, state);
         }
     }
 
@@ -477,5 +540,78 @@ impl RegisterView {
                     }
                 });
             });
+    }
+}
+
+/// At most this many suggestions under the author field.
+const MAX_AUTHOR_SUGGESTIONS: usize = 5;
+
+/// The registered `authors` that contain what is typed, those that start with
+/// it first, and the one Tab completes to (the first, if it starts with the
+/// text). What is already typed in full is not suggested again.
+fn author_suggestions(authors: &[String], typed: &str) -> (Vec<String>, Option<String>) {
+    let typed = fold(typed.trim());
+    if typed.is_empty() {
+        return (Vec::new(), None);
+    }
+    let (mut starting, mut containing) = (Vec::new(), Vec::new());
+    for author in authors {
+        let key = fold(author);
+        if key == typed {
+            continue;
+        }
+        if key.starts_with(&typed) {
+            starting.push(author.clone());
+        } else if key.contains(&typed) {
+            containing.push(author.clone());
+        }
+    }
+    let completion = starting.first().cloned();
+    starting.append(&mut containing);
+    starting.truncate(MAX_AUTHOR_SUGGESTIONS);
+    (starting, completion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn authors() -> Vec<String> {
+        [
+            "Anne Fine",
+            "Éric Carle",
+            "Roald Dahl",
+            "René Goscinny, Jean-Jacques Sempé",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn suggests_authors_starting_with_or_containing_the_text() {
+        let (list, completion) = author_suggestions(&authors(), "re");
+        // "René…" starts with it; "Éric Carle" and "Roald Dahl" do not contain it
+        assert_eq!(list, vec!["René Goscinny, Jean-Jacques Sempé"]);
+        assert_eq!(
+            completion.as_deref(),
+            Some("René Goscinny, Jean-Jacques Sempé")
+        );
+        // accents and case are ignored, and the start of a later word matches
+        let (list, completion) = author_suggestions(&authors(), " DAH");
+        assert_eq!(list, vec!["Roald Dahl"]);
+        assert_eq!(completion, None);
+        let (list, completion) = author_suggestions(&authors(), "eric");
+        assert_eq!(list, vec!["Éric Carle"]);
+        assert_eq!(completion.as_deref(), Some("Éric Carle"));
+    }
+
+    #[test]
+    fn nothing_to_suggest_when_empty_or_already_complete() {
+        assert_eq!(author_suggestions(&authors(), "  "), (Vec::new(), None));
+        assert_eq!(
+            author_suggestions(&authors(), "roald dahl"),
+            (Vec::new(), None)
+        );
+        assert_eq!(author_suggestions(&authors(), "zzz"), (Vec::new(), None));
     }
 }

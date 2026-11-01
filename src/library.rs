@@ -614,6 +614,22 @@ impl Library {
         seen.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// Auteurs déjà enregistrés (livres non archivés), tels qu'ils ont été
+    /// saisis (« Roald Dahl », « René Goscinny, Jean-Jacques Sempé »), sans
+    /// doublon de casse ni d'accents (la première orthographe rencontrée
+    /// l'emporte), triés.
+    pub fn authors(&self) -> Vec<String> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for b in self.books.iter().filter(|b| !b.archived && !b.author.is_empty()) {
+            let key = fold(&b.author);
+            if !seen.iter().any(|(k, _)| *k == key) {
+                seen.push((key, b.author.clone()));
+            }
+        }
+        seen.sort();
+        seen.into_iter().map(|(_, a)| a).collect()
+    }
+
     /// Classes déjà utilisées, sans doublon de casse ni d'accents (la
     /// première orthographe rencontrée l'emporte), dans l'ordre de l'école :
     /// PS, MS, GS, CP, CE1, CE2, CM1, CM2, puis les autres par ordre
@@ -1141,6 +1157,24 @@ mod tests {
         input.category = "BD".into();
         lib.update_book(id, &input).unwrap();
         assert_eq!(lib.book(id).unwrap().category, "BD");
+    }
+
+    #[test]
+    fn authors_are_distinct_and_sorted() {
+        let mut lib = Library::new();
+        for (title, author) in [
+            ("A", "Roald Dahl"),
+            ("B", "roald dahl"),
+            ("C", "Éric Carle"),
+            ("D", ""),
+            ("E", "Anne Fine"),
+        ] {
+            let mut input = book(title);
+            input.author = author.into();
+            lib.add_book(input).unwrap();
+        }
+        // the first spelling wins; accents and case are ignored
+        assert_eq!(lib.authors(), vec!["Anne Fine", "Éric Carle", "Roald Dahl"]);
     }
 
     #[test]
