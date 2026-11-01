@@ -1,32 +1,67 @@
-//! Home screen: lend and take back books. The pupil (left) and the book
-//! (right) face each other, so the screen reads « this pupil borrows this
-//! book ». A scanned code goes to its side by itself, whichever field has the
-//! cursor; without the scanner, the pupil field takes a name and the book
-//! field a title.
+//! Home screen: lend and take back books with the barcode scanner, or by
+//! typing codes and pupil names when the scanner does not work.
 //!
-//! Nothing is recorded until it is validated (button or Enter): a free book
-//! is lent to the chosen pupil; a book that is out cannot be lent to anyone,
-//! only returned.
+//! Lending and returning are two modes, chosen with two big buttons and
+//! colour-coded all over the screen (blue: lend, orange: return). A scan
+//! only ever does what the current mode says.
 
 use biblo::codes::{book_code, student_code};
 use biblo::dates::{format_date, parse_date};
-use biblo::desk::{find_books, find_students, propose, read_entry, Entry, Field, Proposal};
+use biblo::desk::{
+    decide_lend, decide_return, find_books, find_students, LendDecision, ReturnDecision,
+};
 use biblo::{Library, Store};
 use chrono::NaiveDate;
-use eframe::egui::{self, Align, Color32, FontId, Key, Layout, Margin, RichText};
+use eframe::egui::{self, Color32, FontId, Key, Margin, RichText, Stroke};
 
 use super::theme::{self, Badge};
 
-/// Pupils or books suggested under a field while a name is typed.
+/// Pupils suggested under the scan field while a name is typed.
 const MAX_SUGGESTIONS: usize = 8;
 
-/// Message about the last loan or return, or about what went wrong.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Lend,
+    Return,
+}
+
+impl Mode {
+    fn title(self) -> &'static str {
+        match self {
+            Mode::Lend => "📤 Prêter un livre",
+            Mode::Return => "📥 Rendre un livre",
+        }
+    }
+
+    fn color(self) -> Color32 {
+        match self {
+            Mode::Lend => theme::LEND,
+            Mode::Return => theme::RETURN,
+        }
+    }
+
+    fn soft(self) -> Badge {
+        match self {
+            Mode::Lend => theme::LEND_SOFT,
+            Mode::Return => theme::RETURN_SOFT,
+        }
+    }
+
+    /// Banner colours once something has been recorded.
+    fn done(self) -> Badge {
+        (self.color(), Color32::WHITE)
+    }
+}
+
+/// Big message shown after every scan.
 struct Feedback {
     colors: Badge,
     title: String,
     detail: String,
     /// Shows the undo button (only right after a loan or a return).
     undoable: bool,
+    /// Offers to switch to this mode, when the scan was meant for it.
+    switch_to: Option<Mode>,
 }
 
 impl Feedback {
@@ -36,6 +71,7 @@ impl Feedback {
             title: title.into(),
             detail: detail.into(),
             undoable: false,
+            switch_to: None,
         }
     }
 
@@ -43,9 +79,14 @@ impl Feedback {
         self.undoable = true;
         self
     }
+
+    fn switch_to(mut self, mode: Mode) -> Feedback {
+        self.switch_to = Some(mode);
+        self
+    }
 }
 
-/// The last loan or return (loan id), so a mistake can be undone.
+/// The last loan or return (loan id), so a wrong scan can be undone.
 #[derive(Clone, Copy)]
 enum LastAction {
     Lent(u32),
@@ -53,17 +94,11 @@ enum LastAction {
 }
 
 pub struct LoansView {
-    student_input: String,
-    book_input: String,
-    /// The pupil who borrows; cleared after each loan, so that the next book
-    /// always needs a card again and never goes to the previous pupil.
+    mode: Mode,
+    input: String,
+    focus_scan: bool,
+    /// Lend mode: the pupil who is borrowing; cleared after each loan.
     student: Option<u32>,
-    book: Option<u32>,
-    /// Field that gets the keyboard (and so the scanner) on the next frame.
-    focus: Option<Field>,
-    /// What was wrong with the last entry in each field.
-    student_error: Option<String>,
-    book_error: Option<String>,
     feedback: Option<Feedback>,
     last_action: Option<LastAction>,
     /// Date used for loans and returns: today, unless edited.
@@ -74,13 +109,10 @@ pub struct LoansView {
 impl Default for LoansView {
     fn default() -> Self {
         LoansView {
-            student_input: String::new(),
-            book_input: String::new(),
+            mode: Mode::Lend,
+            input: String::new(),
+            focus_scan: true,
             student: None,
-            book: None,
-            focus: Some(Field::Student),
-            student_error: None,
-            book_error: None,
             feedback: None,
             last_action: None,
             date_text: String::new(),
@@ -133,19 +165,6 @@ fn loan_info(lib: &Library, loan: u32, today: NaiveDate) -> (String, String, Str
         .unwrap_or_default()
 }
 
-/// A card whose thick border shows that something is chosen on that side.
-fn side_card(ui: &mut egui::Ui, border: Option<Color32>, add: impl FnOnce(&mut egui::Ui)) {
-    match border {
-        Some(color) => theme::outlined_card(ui, color, add),
-        None => theme::card(ui, add),
-    }
-}
-
-/// Big bold text for the chosen pupil or book.
-fn big(text: impl Into<String>) -> RichText {
-    RichText::new(text).family(theme::bold()).size(26.0)
-}
-
 impl LoansView {
     /// `late_days`: books out this many days or more are shown as late.
     pub fn ui(&mut self, ui: &mut egui::Ui, store: &mut Store, late_days: i64) {
@@ -155,137 +174,298 @@ impl LoansView {
             self.date_text = format_date(today);
         }
         if ui.input(|i| i.key_pressed(Key::Escape)) {
-            self.clear_all();
+            self.reset();
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            self.top_bar(ui);
-            ui.add_space(10.0);
-            let proposal = propose(store.lib(), self.student, self.book);
-            let spacing = ui.spacing().item_spacing;
-            let sides = ui
-                .scope(|ui| {
-                    // Room between the two cards for the arrow…
-                    ui.spacing_mut().item_spacing.x = 64.0;
-                    ui.columns(2, |cols| {
-                        // … but the usual spacing inside them.
-                        for col in cols.iter_mut() {
-                            col.spacing_mut().item_spacing = spacing;
-                        }
-                        let plain = Layout::top_down(Align::Min);
-                        cols[0].with_layout(plain, |ui| {
-                            self.student_side(ui, store, today, late_days)
-                        });
-                        cols[1].with_layout(plain, |ui| self.book_side(ui, store, today));
-                    });
-                })
-                .response
-                .rect;
-            arrow(ui, sides, &proposal);
-            ui.add_space(14.0);
-            self.action_area(ui, store, today);
+            self.mode_buttons(ui);
+            ui.add_space(12.0);
+            theme::outlined_card(ui, self.mode.color(), |ui| self.scan_card(ui, store, today));
+            if let Some(colors) = self.feedback.as_ref().map(|f| f.colors) {
+                ui.add_space(12.0);
+                self.feedback_banner(ui, store, colors);
+            }
+            ui.add_space(12.0);
+            theme::card(ui, |ui| match self.mode {
+                Mode::Lend => self.student_card(ui, store.lib(), today, late_days),
+                Mode::Return => return_help(ui),
+            });
         });
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    /// The two big buttons that choose between lending and returning.
+    fn mode_buttons(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("🔁 Prêts et retours");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if self.date_edited && ui.button("Aujourd'hui").clicked() {
-                    self.date_edited = false;
+            for mode in [Mode::Lend, Mode::Return] {
+                let selected = self.mode == mode;
+                let (fill, text_color) = if selected {
+                    (mode.color(), Color32::WHITE)
+                } else {
+                    (theme::CARD, mode.color())
+                };
+                let button = egui::Button::new(
+                    RichText::new(mode.title())
+                        .family(theme::bold())
+                        .size(24.0)
+                        .color(text_color),
+                )
+                .fill(fill)
+                .stroke(Stroke::new(2.0, mode.color()))
+                .corner_radius(14)
+                .min_size(egui::vec2(320.0, 58.0));
+                if ui.add(button).clicked() && !selected {
+                    self.set_mode(mode);
                 }
-                let date =
-                    ui.add(egui::TextEdit::singleline(&mut self.date_text).desired_width(120.0));
-                if date.changed() {
-                    self.date_edited = true;
-                }
-                ui.label("Date :");
-            });
+            }
+        });
+    }
+
+    fn scan_card(&mut self, ui: &mut egui::Ui, store: &mut Store, today: NaiveDate) {
+        ui.label(
+            RichText::new(self.mode.title())
+                .family(theme::bold())
+                .size(28.0)
+                .color(self.mode.color()),
+        );
+        let student = self.student.and_then(|id| store.lib().student(id));
+        let (step, hint) = match (self.mode, student) {
+            (Mode::Lend, None) => (
+                "Étape 1 sur 2 : scannez la carte de l'élève qui emprunte.".to_string(),
+                "Carte de l'élève…",
+            ),
+            (Mode::Lend, Some(s)) => (
+                format!(
+                    "Étape 2 sur 2 : scannez le livre que {} emprunte.",
+                    s.full_name()
+                ),
+                "Livre à prêter…",
+            ),
+            (Mode::Return, _) => (
+                "Scannez le livre rendu : son retour est enregistré tout de suite.".to_string(),
+                "Code du livre, ou début du titre…",
+            ),
+        };
+        ui.label(RichText::new(step).size(19.0));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let scan = ui.add(
+                egui::TextEdit::singleline(&mut self.input)
+                    .font(FontId::proportional(28.0))
+                    .hint_text(hint)
+                    .desired_width(560.0),
+            );
+            // Check Enter first: giving the focus back would hide the submission.
+            if scan.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                self.on_enter(store, today);
+                self.focus_scan = true;
+            }
+            // The scanner types into whatever has the focus: keep it here
+            // unless the user clicked into another field.
+            let nothing_focused = ui.ctx().memory(|m| m.focused().is_none());
+            if std::mem::take(&mut self.focus_scan) || nothing_focused {
+                scan.request_focus();
+            }
+            ui.add_space(16.0);
+            ui.label("Date :");
+            let date = ui.add(egui::TextEdit::singleline(&mut self.date_text).desired_width(120.0));
+            if date.changed() {
+                self.date_edited = true;
+            }
+            if self.date_edited && ui.button("Aujourd'hui").clicked() {
+                self.date_edited = false;
+                self.focus_scan = true;
+            }
+        });
+        ui.weak(match self.mode {
+            Mode::Lend => "Sans lecteur : tapez le code (E12, L345 ou juste le numéro) ou le nom de l'élève, puis Entrée.",
+            Mode::Return => "Sans lecteur : tapez le début du titre (les livres prêtés s'affichent) ou le code du livre (L345 ou juste le numéro).",
         });
         if self.date_edited {
+            let what = match self.mode {
+                Mode::Lend => "Les prêts",
+                Mode::Return => "Les retours",
+            };
             ui.colored_label(
                 theme::ON_LOAN.1,
                 format!(
-                    "⚠ Les prêts et retours sont enregistrés à la date du {}, pas aujourd'hui.",
+                    "⚠ {what} sont enregistrés à la date du {}, pas aujourd'hui.",
                     self.date_text.trim()
                 ),
             );
         }
-    }
 
-    /// The field where the scanner should type next: the pupil until one is
-    /// chosen, then the book (where Enter also validates).
-    fn expected_field(&self) -> Field {
-        if self.student.is_none() {
-            Field::Student
-        } else {
-            Field::Book
+        // Typing a title: suggest the matching books that are out.
+        if self.mode == Mode::Return {
+            if let ReturnDecision::NotACode(text) = decide_return(store.lib(), &self.input) {
+                if text.chars().count() >= 2 {
+                    self.book_suggestions(ui, store, &text, today);
+                }
+            }
         }
-    }
 
-    /// The text field of one side, with Enter and focus handling.
-    fn field(&mut self, ui: &mut egui::Ui, store: &mut Store, field: Field, today: NaiveDate) {
-        let (text, hint) = match field {
-            Field::Student => (&mut self.student_input, "Carte de l'élève, ou nom…"),
-            Field::Book => (&mut self.book_input, "Code du livre, ou titre…"),
-        };
-        let input = ui.add(
-            egui::TextEdit::singleline(text)
-                .font(FontId::proportional(24.0))
-                .hint_text(hint)
-                .desired_width(f32::INFINITY),
-        );
-        // Check Enter first: giving the focus back would hide the submission.
-        if input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            self.on_enter(store, field, today);
-        }
-        // The scanner types into whatever has the focus: keep it on the
-        // expected field, unless the user clicked into another one.
-        let nothing_focused = ui.ctx().memory(|m| m.focused().is_none());
-        if self.focus == Some(field) || (nothing_focused && self.expected_field() == field) {
-            input.request_focus();
-            self.focus = None;
-        }
-        let error = match field {
-            Field::Student => &self.student_error,
-            Field::Book => &self.book_error,
-        };
-        if let Some(error) = error {
-            ui.colored_label(theme::RED, format!("⚠ {error}"));
+        // Typing a name: suggest the matching pupils.
+        if self.mode == Mode::Lend {
+            if let LendDecision::SearchName(text) =
+                decide_lend(store.lib(), self.student, &self.input)
+            {
+                if text.chars().count() >= 2 {
+                    self.suggestions(ui, store.lib(), &text);
+                }
+            }
         }
     }
 
-    fn student_side(
+    /// Return mode: the books matching `text` that are out, each with its
+    /// borrower, and a button to take it back.
+    fn book_suggestions(
         &mut self,
         ui: &mut egui::Ui,
         store: &mut Store,
+        text: &str,
         today: NaiveDate,
-        late_days: i64,
     ) {
-        let border = self.student.map(|_| theme::LEND);
-        side_card(ui, border, |ui| {
+        let lib = store.lib();
+        let found = find_books(lib, text);
+        let out: Vec<u32> = found
+            .iter()
+            .copied()
+            .filter(|&id| lib.open_loan_for_book(id).is_some())
+            .collect();
+        ui.add_space(6.0);
+        if out.is_empty() {
+            ui.label(if found.is_empty() {
+                format!("Aucun livre ne correspond à « {text} ».")
+            } else {
+                format!("« {text} » : aucun exemplaire n'est prêté, il n'y a rien à rendre.")
+            });
+            return;
+        }
+        let mut chosen = None;
+        for &id in out.iter().take(MAX_SUGGESTIONS) {
+            let Some(loan) = lib.open_loan_for_book(id) else {
+                continue;
+            };
             ui.horizontal(|ui| {
-                ui.heading("🎒 L'élève");
-                if self.student.is_some() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("✖ Changer").clicked() {
-                            self.student = None;
-                            self.focus = Some(Field::Student);
-                        }
-                    });
+                if ui
+                    .add(theme::main_button("📥 Rendre", theme::RETURN))
+                    .clicked()
+                {
+                    chosen = Some(id);
+                }
+                ui.monospace(book_code(id));
+                ui.label(title(lib, id));
+                ui.weak(format!(
+                    "prêté à {} depuis le {}",
+                    name(lib, loan.student_id),
+                    format_date(loan.borrowed_on)
+                ));
+            });
+        }
+        if out.len() > MAX_SUGGESTIONS {
+            ui.weak(format!(
+                "… et {} autre(s) : précisez le titre.",
+                out.len() - MAX_SUGGESTIONS
+            ));
+        }
+        if let Some(book) = chosen {
+            self.input.clear();
+            self.focus_scan = true;
+            self.return_book(store, book, today);
+        }
+    }
+
+    fn suggestions(&mut self, ui: &mut egui::Ui, lib: &Library, text: &str) {
+        let found = find_students(lib, text);
+        ui.add_space(6.0);
+        if found.is_empty() {
+            ui.label(format!("Aucun élève ne correspond à « {text} »."));
+            return;
+        }
+        for &id in found.iter().take(MAX_SUGGESTIONS) {
+            let Some(s) = lib.student(id) else { continue };
+            ui.horizontal(|ui| {
+                if ui.button("Choisir").clicked() {
+                    self.select_student(lib, id);
+                }
+                ui.label(format!("{} ({})", s.full_name(), format_date(s.birth_date)));
+                ui.weak(format!("{} {}", s.class, student_code(id)).trim_start());
+            });
+        }
+        if found.len() > MAX_SUGGESTIONS {
+            ui.weak(format!(
+                "… et {} autre(s) : précisez le nom.",
+                found.len() - MAX_SUGGESTIONS
+            ));
+        }
+    }
+
+    fn feedback_banner(&mut self, ui: &mut egui::Ui, store: &mut Store, colors: Badge) {
+        let (mut undo, mut switch) = (false, None);
+        egui::Frame::new()
+            .fill(colors.0)
+            .corner_radius(16)
+            .inner_margin(Margin::same(18))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let Some(f) = &self.feedback else { return };
+                ui.label(
+                    RichText::new(&f.title)
+                        .family(theme::bold())
+                        .size(28.0)
+                        .color(colors.1),
+                );
+                if !f.detail.is_empty() {
+                    ui.label(RichText::new(&f.detail).size(19.0).color(colors.1));
+                }
+                if colors == theme::ERROR {
+                    ui.label(
+                        RichText::new("Rien n'a été enregistré.")
+                            .family(theme::bold())
+                            .size(19.0)
+                            .color(colors.1),
+                    );
+                }
+                let undo_text = match self.last_action {
+                    Some(LastAction::Lent(_)) => "↩ Annuler ce prêt",
+                    Some(LastAction::Returned(_)) => "↩ Annuler ce retour",
+                    None => "",
+                };
+                if f.undoable && !undo_text.is_empty() {
+                    ui.add_space(4.0);
+                    undo = ui.button(undo_text).clicked();
+                }
+                if let Some(mode) = f.switch_to {
+                    ui.add_space(4.0);
+                    let text = format!("Passer à « {} »", mode.title());
+                    if ui.add(theme::main_button(&text, mode.color())).clicked() {
+                        switch = Some(mode);
+                    }
                 }
             });
-            self.field(ui, store, Field::Student, today);
-            ui.weak("Sans lecteur : tapez le nom (ou le numéro de la carte), puis Entrée.");
-            self.suggestions(ui, store.lib(), Field::Student);
-            ui.add_space(6.0);
+        if undo {
+            self.undo(store);
+            self.focus_scan = true;
+        }
+        if let Some(mode) = switch {
+            self.set_mode(mode);
+        }
+    }
 
-            let lib = store.lib();
-            let Some(s) = self.student.and_then(|id| lib.student(id)) else {
-                ui.weak("Aucun élève choisi.");
-                return;
-            };
-            ui.label(big(s.full_name()));
+    fn student_card(&mut self, ui: &mut egui::Ui, lib: &Library, today: NaiveDate, late_days: i64) {
+        let Some(s) = self.student.and_then(|id| lib.student(id)) else {
+            ui.heading("🎒 Comment prêter un livre ?");
+            ui.add_space(4.0);
+            ui.label("1. Scannez la carte de l'élève (ou tapez son nom).");
+            ui.label("2. Scannez le livre : le prêt est enregistré.");
+            ui.label("Un livre qui revient ? Cliquez d'abord sur « 📥 Rendre un livre » en haut.");
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("🎒 {}", s.full_name()))
+                    .family(theme::bold())
+                    .size(28.0),
+            );
             let class = if s.class.is_empty() {
                 String::new()
             } else {
@@ -296,378 +476,48 @@ impl LoansView {
                 format_date(s.birth_date),
                 student_code(s.id)
             ));
-            let loans = lib.open_loans_of_student(s.id);
-            if loans.is_empty() {
-                ui.label("Aucun livre emprunté pour l'instant.");
-                return;
-            }
-            ui.label(format!(
-                "Livres déjà empruntés ({}), depuis le :",
-                loans.len()
-            ));
-            for loan in loans {
-                let days_out = loan.days_out(today);
-                ui.horizontal(|ui| {
-                    ui.weak(format_date(loan.borrowed_on));
-                    if days_out >= late_days {
-                        theme::badge(ui, &format!("⏰ {}", days(days_out)), theme::ERROR);
-                    }
-                    // Last: a long title is cut to the card's width.
-                    ui.add(egui::Label::new(title(lib, loan.book_id)).truncate());
-                });
+            if ui.button("Changer d'élève (Échap)").clicked() {
+                self.reset();
             }
         });
-    }
-
-    fn book_side(&mut self, ui: &mut egui::Ui, store: &mut Store, today: NaiveDate) {
-        let out = self.book.and_then(|id| store.lib().open_loan_for_book(id));
-        let border = match (self.book, out) {
-            (None, _) => None,
-            (Some(_), None) => Some(theme::GREEN),
-            (Some(_), Some(_)) => Some(theme::RETURN),
-        };
-        side_card(ui, border, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("📖 Le livre");
-                if self.book.is_some() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("✖ Changer").clicked() {
-                            self.book = None;
-                            self.focus = Some(Field::Book);
-                        }
-                    });
-                }
-            });
-            self.field(ui, store, Field::Book, today);
-            ui.weak(
-                "Sans lecteur : tapez le titre (ou le numéro sous le code-barres), puis Entrée.",
-            );
-            self.suggestions(ui, store.lib(), Field::Book);
-            ui.add_space(6.0);
-
-            let lib = store.lib();
-            let Some(b) = self.book.and_then(|id| lib.book(id)) else {
-                ui.weak("Aucun livre choisi.");
-                return;
-            };
-            ui.add(egui::Label::new(big(format!("« {} »", b.title))).truncate());
-            ui.horizontal(|ui| {
-                let mut about = book_code(b.id);
-                if !b.author.is_empty() {
-                    about = format!("{} · {about}", b.author);
-                }
-                ui.weak(about);
-                if !b.category.is_empty() {
-                    theme::badge(ui, &b.category, theme::category_badge(&b.category));
-                }
-            });
-            match lib.open_loan_for_book(b.id) {
-                None => theme::badge(ui, "Disponible", theme::AVAILABLE),
-                Some(loan) => theme::badge(
-                    ui,
-                    &format!(
-                        "Emprunté par {} depuis le {} ({})",
-                        name(lib, loan.student_id),
-                        format_date(loan.borrowed_on),
-                        days(loan.days_out(today))
-                    ),
-                    theme::ON_LOAN,
-                ),
-            }
-            if !b.note.is_empty() {
-                ui.label(
-                    RichText::new(format!("📝 {}", b.note.replace('\n', " · ")))
-                        .italics()
-                        .color(theme::NOTE.1),
-                );
-            }
-        });
-    }
-
-    /// While a name or a title is typed: the matching pupils or books.
-    fn suggestions(&mut self, ui: &mut egui::Ui, lib: &Library, field: Field) {
-        let text = match field {
-            Field::Student => &self.student_input,
-            Field::Book => &self.book_input,
-        };
-        let Entry::Search(_, text) = read_entry(lib, field, text) else {
-            return;
-        };
-        if text.chars().count() < 2 {
-            return;
-        }
-        let found = match field {
-            Field::Student => find_students(lib, &text),
-            Field::Book => find_books(lib, &text),
-        };
+        let loans = lib.open_loans_of_student(s.id);
         ui.add_space(4.0);
-        if found.is_empty() {
-            ui.label(match field {
-                Field::Student => format!("Aucun élève ne correspond à « {text} »."),
-                Field::Book => format!("Aucun livre ne correspond à « {text} »."),
-            });
+        if loans.is_empty() {
+            ui.label("Aucun livre emprunté pour l'instant.");
             return;
         }
-        for &id in found.iter().take(MAX_SUGGESTIONS) {
+        ui.label(format!("Livres déjà empruntés ({}) :", loans.len()));
+        for loan in loans {
+            let days_out = loan.days_out(today);
             ui.horizontal(|ui| {
-                if ui.button("Choisir").clicked() {
-                    match field {
-                        Field::Student => self.choose_student(id),
-                        Field::Book => self.choose_book(id),
-                    }
-                }
-                match field {
-                    Field::Student => {
-                        let Some(s) = lib.student(id) else { return };
-                        ui.label(s.full_name());
-                        let about = format!(
-                            "{} {} {}",
-                            s.class,
-                            format_date(s.birth_date),
-                            student_code(id)
-                        );
-                        ui.weak(about.trim_start());
-                    }
-                    Field::Book => {
-                        ui.monospace(book_code(id));
-                        match lib.open_loan_for_book(id) {
-                            None => theme::badge(ui, "Disponible", theme::AVAILABLE),
-                            Some(loan) => theme::badge(
-                                ui,
-                                &format!("Emprunté par {}", name(lib, loan.student_id)),
-                                theme::ON_LOAN,
-                            ),
-                        }
-                        ui.add(egui::Label::new(title(lib, id)).truncate());
-                    }
+                ui.monospace(book_code(loan.book_id));
+                ui.label(title(lib, loan.book_id));
+                ui.weak(format!(
+                    "depuis le {} ({})",
+                    format_date(loan.borrowed_on),
+                    days(days_out)
+                ));
+                if days_out >= late_days {
+                    theme::badge(ui, "⏰ en retard", theme::ERROR);
                 }
             });
-        }
-        if found.len() > MAX_SUGGESTIONS {
-            ui.weak(format!(
-                "… et {} autre(s) : précisez.",
-                found.len() - MAX_SUGGESTIONS
-            ));
-        }
-    }
-
-    /// Under the two cards: the last result, then what can be done now.
-    fn action_area(&mut self, ui: &mut egui::Ui, store: &mut Store, today: NaiveDate) {
-        if let Some(colors) = self.feedback.as_ref().map(|f| f.colors) {
-            self.feedback_banner(ui, store, colors);
-            ui.add_space(10.0);
-        }
-        let lib = store.lib();
-        let proposal = propose(lib, self.student, self.book);
-        let (mut validate, mut cancel) = (false, false);
-        match &proposal {
-            Proposal::Lend { student, book } => {
-                banner(ui, theme::LEND_SOFT, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        let color = theme::LEND_SOFT.1;
-                        ui.label(big(format!("🎒 {}", name(lib, *student))).color(color));
-                        ui.label(big("➡ emprunte ➡").color(theme::LEND));
-                        ui.label(big(format!("📖 {}", title(lib, *book))).color(color));
-                    });
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        validate = ui
-                            .add(theme::main_button(
-                                "✔ Valider le prêt (Entrée)",
-                                theme::LEND,
-                            ))
-                            .clicked();
-                        cancel = ui.button("Annuler").clicked();
-                    });
-                });
-            }
-            Proposal::Return {
-                book,
-                loan,
-                borrower,
-            } => {
-                let (who, since, out) = loan_info(lib, *loan, today);
-                banner(ui, theme::RETURN_SOFT, |ui| {
-                    let color = theme::RETURN_SOFT.1;
-                    ui.label(
-                        big(format!("⚠ {} est déjà emprunté", title(lib, *book))).color(color),
-                    );
-                    let mut text = format!("par {who}, depuis le {since} ({out}).");
-                    match self.student {
-                        Some(s) if s == *borrower => {
-                            text.push_str(&format!(" {who} est l'élève choisi."));
-                        }
-                        Some(s) => text
-                            .push_str(&format!(" Il ne peut pas être prêté à {}.", name(lib, s))),
-                        None => text.push_str(" Il ne peut pas être prêté."),
-                    }
-                    ui.label(RichText::new(text).size(19.0).color(color));
-                    ui.label(
-                        RichText::new("S'il s'agit d'un retour, merci de valider :")
-                            .size(19.0)
-                            .color(color),
-                    );
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        validate = ui
-                            .add(theme::main_button(
-                                "📥 Valider le retour (Entrée)",
-                                theme::RETURN,
-                            ))
-                            .clicked();
-                        cancel = ui.button("Annuler").clicked();
-                    });
-                });
-            }
-            Proposal::Incomplete => {
-                let text = match (self.student, self.book) {
-                    (Some(s), _) => format!(
-                        "Scannez maintenant le livre que {} emprunte.\n\
-                         Pour un retour, scannez simplement le livre.",
-                        name(lib, s)
-                    ),
-                    (None, Some(b)) => format!(
-                        "{} est disponible : scannez la carte de l'élève qui l'emprunte.",
-                        title(lib, b)
-                    ),
-                    (None, None) => "Pour un prêt : la carte de l'élève et le livre, dans \
-                                     l'ordre que vous voulez.\n\
-                                     Pour un retour : le livre suffit."
-                        .to_string(),
-                };
-                banner(ui, (theme::CARD, theme::INK), |ui| {
-                    ui.label(RichText::new(text).size(19.0));
-                });
-            }
-        }
-        if validate {
-            self.validate(store, today);
-        }
-        if cancel {
-            self.book = None;
-            self.focus = Some(self.expected_field());
-        }
-    }
-
-    fn feedback_banner(&mut self, ui: &mut egui::Ui, store: &mut Store, colors: Badge) {
-        let mut undo = false;
-        banner(ui, colors, |ui| {
-            let Some(f) = &self.feedback else { return };
-            ui.label(
-                RichText::new(&f.title)
-                    .family(theme::bold())
-                    .size(26.0)
-                    .color(colors.1),
-            );
-            if !f.detail.is_empty() {
-                ui.label(RichText::new(&f.detail).size(19.0).color(colors.1));
-            }
-            if colors == theme::ERROR {
-                ui.label(
-                    RichText::new("Rien n'a été enregistré.")
-                        .family(theme::bold())
-                        .size(19.0)
-                        .color(colors.1),
-                );
-            }
-            let undo_text = match self.last_action {
-                Some(LastAction::Lent(_)) => "↩ Annuler ce prêt",
-                Some(LastAction::Returned(_)) => "↩ Annuler ce retour",
-                None => "",
-            };
-            if f.undoable && !undo_text.is_empty() {
-                ui.add_space(4.0);
-                undo = ui.button(undo_text).clicked();
-            }
-        });
-        if undo {
-            self.undo(store);
-            self.focus = Some(self.expected_field());
         }
     }
 
     // ------------------------------------------------------------ actions
 
-    fn clear_all(&mut self) {
+    fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.last_action = None;
+        self.reset();
+    }
+
+    /// Back to the start of the current mode: no pupil, no message.
+    fn reset(&mut self) {
         self.student = None;
-        self.book = None;
-        self.student_input.clear();
-        self.book_input.clear();
-        self.student_error = None;
-        self.book_error = None;
+        self.input.clear();
         self.feedback = None;
-        self.focus = Some(Field::Student);
-    }
-
-    fn choose_student(&mut self, id: u32) {
-        self.student = Some(id);
-        self.student_input.clear();
-        self.student_error = None;
-        // A new loan starts: the previous result would only confuse.
-        self.feedback = None;
-        self.focus = Some(self.expected_field());
-    }
-
-    fn choose_book(&mut self, id: u32) {
-        self.book = Some(id);
-        self.book_input.clear();
-        self.book_error = None;
-        self.feedback = None;
-        self.focus = Some(self.expected_field());
-    }
-
-    fn on_enter(&mut self, store: &mut Store, field: Field, today: NaiveDate) {
-        let input = match field {
-            Field::Student => std::mem::take(&mut self.student_input),
-            Field::Book => std::mem::take(&mut self.book_input),
-        };
-        self.focus = Some(field);
-        // Enter on an empty field validates what is proposed.
-        if input.trim().is_empty() {
-            self.validate(store, today);
-            return;
-        }
-        let lib = store.lib();
-        let error = match read_entry(lib, field, &input) {
-            Entry::Nothing => None,
-            Entry::Student(id) => {
-                self.choose_student(id);
-                None
-            }
-            Entry::Book(id) => {
-                self.choose_book(id);
-                None
-            }
-            Entry::Search(Field::Student, text) => match find_students(lib, &text).as_slice() {
-                [] => Some(format!("Aucun élève ne correspond à « {text} ».")),
-                [id] => {
-                    self.choose_student(*id);
-                    None
-                }
-                _ => {
-                    // Keep the text: the list to choose from stays visible.
-                    self.student_input = input;
-                    None
-                }
-            },
-            Entry::Search(Field::Book, text) => match find_books(lib, &text).as_slice() {
-                [] => Some(format!("Aucun livre ne correspond à « {text} ».")),
-                [id] => {
-                    self.choose_book(*id);
-                    None
-                }
-                _ => {
-                    self.book_input = input;
-                    None
-                }
-            },
-            Entry::Refused(e) => Some(e.to_string()),
-        };
-        // A new entry replaces the previous error, if any.
-        match field {
-            Field::Student => self.student_error = error,
-            Field::Book => self.book_error = error,
-        }
+        self.focus_scan = true;
     }
 
     /// The date typed in the date field, if valid.
@@ -693,13 +543,162 @@ impl LoansView {
         }
     }
 
-    /// Records what is proposed: the loan, or the return.
-    fn validate(&mut self, store: &mut Store, today: NaiveDate) {
-        match propose(store.lib(), self.student, self.book) {
-            Proposal::Lend { student, book } => self.lend(store, book, student, today),
-            Proposal::Return { book, .. } => self.return_book(store, book, today),
-            Proposal::Incomplete => {}
+    fn on_enter(&mut self, store: &mut Store, today: NaiveDate) {
+        let input = std::mem::take(&mut self.input);
+        match self.mode {
+            Mode::Lend => self.on_lend_scan(store, input, today),
+            Mode::Return => self.on_return_scan(store, &input, today),
         }
+    }
+
+    fn on_lend_scan(&mut self, store: &mut Store, input: String, today: NaiveDate) {
+        let decision = decide_lend(store.lib(), self.student, &input);
+        let lib = store.lib();
+        match decision {
+            LendDecision::Nothing => {}
+            LendDecision::SelectStudent(id) => self.select_student(lib, id),
+            LendDecision::Lend { book, student } => self.lend(store, book, student, today),
+            LendDecision::AlreadyLent { book, loan } => {
+                let (who, since, out) = loan_info(lib, loan, today);
+                self.feedback = Some(
+                    Feedback::new(
+                        theme::ERROR,
+                        format!("⚠ {} est déjà prêté", title(lib, book)),
+                        format!(
+                            "à {who}, depuis le {since} ({out}). S'il vient d'être rendu, \
+                             enregistrez d'abord son retour avec « {} ».",
+                            Mode::Return.title()
+                        ),
+                    )
+                    .switch_to(Mode::Return),
+                );
+            }
+            LendDecision::NeedStudent { book } => {
+                self.feedback = Some(Feedback::new(
+                    theme::ERROR,
+                    "⚠ Scannez d'abord la carte de l'élève",
+                    format!(
+                        "Pour prêter {} : 1. la carte de l'élève, 2. le livre.",
+                        title(lib, book)
+                    ),
+                ));
+            }
+            LendDecision::SearchName(text) => match find_students(lib, &text).as_slice() {
+                [] => {
+                    self.feedback = Some(Feedback::new(
+                        theme::ERROR,
+                        "⚠ Code ou nom inconnu",
+                        format!("Aucun élève ne correspond à « {text} »."),
+                    ));
+                }
+                [id] => self.select_student(lib, *id),
+                found => {
+                    // Keep the text so the suggestions stay visible.
+                    self.feedback = Some(Feedback::new(
+                        theme::LEND_SOFT,
+                        format!("{} élèves correspondent", found.len()),
+                        "Cliquez sur « Choisir » à côté du bon élève.",
+                    ));
+                    self.input = input;
+                }
+            },
+            LendDecision::Refused(e) => {
+                self.feedback = Some(Feedback::new(theme::ERROR, "⚠ Impossible", e.to_string()));
+            }
+        }
+    }
+
+    fn on_return_scan(&mut self, store: &mut Store, input: &str, today: NaiveDate) {
+        let decision = decide_return(store.lib(), input);
+        let lib = store.lib();
+        match decision {
+            ReturnDecision::Nothing => {}
+            ReturnDecision::Return { book, .. } => self.return_book(store, book, today),
+            ReturnDecision::NotLent { book } => {
+                self.feedback = Some(
+                    Feedback::new(
+                        theme::ERROR,
+                        format!("⚠ {} n'est pas prêté", title(lib, book)),
+                        format!(
+                            "Il est déjà disponible : il n'y a rien à rendre. \
+                             Pour le prêter, passez à « {} ».",
+                            Mode::Lend.title()
+                        ),
+                    )
+                    .switch_to(Mode::Lend),
+                );
+            }
+            ReturnDecision::StudentCard(_) => {
+                self.feedback = Some(
+                    Feedback::new(
+                        theme::ERROR,
+                        "⚠ C'est une carte d'élève",
+                        format!(
+                            "Pour un retour, scannez seulement le livre. \
+                             Pour un prêt, passez à « {} ».",
+                            Mode::Lend.title()
+                        ),
+                    )
+                    .switch_to(Mode::Lend),
+                );
+            }
+            ReturnDecision::NotACode(text) => {
+                let found = find_books(lib, &text);
+                let out: Vec<u32> = found
+                    .iter()
+                    .copied()
+                    .filter(|&id| lib.open_loan_for_book(id).is_some())
+                    .collect();
+                match out.as_slice() {
+                    // One book out with this title: it is the one.
+                    [book] => self.return_book(store, *book, today),
+                    [] => {
+                        let (heading, detail) = if found.is_empty() {
+                            (
+                                "⚠ Livre introuvable",
+                                format!("Aucun livre ne correspond à « {text} »."),
+                            )
+                        } else {
+                            (
+                                "⚠ Ce livre n'est pas prêté",
+                                format!(
+                                    "« {text} » : aucun exemplaire n'est prêté, il n'y a rien à rendre."
+                                ),
+                            )
+                        };
+                        self.feedback = Some(Feedback::new(theme::ERROR, heading, detail));
+                    }
+                    _ => {
+                        // Keep the text so the list to choose from stays visible.
+                        self.feedback = Some(Feedback::new(
+                            theme::RETURN_SOFT,
+                            format!("{} livres prêtés correspondent", out.len()),
+                            "Cliquez sur « Rendre » à côté du bon livre.",
+                        ));
+                        self.input = text;
+                    }
+                }
+            }
+            ReturnDecision::Refused(e) => {
+                self.feedback = Some(Feedback::new(theme::ERROR, "⚠ Impossible", e.to_string()));
+            }
+        }
+    }
+
+    fn select_student(&mut self, lib: &Library, id: u32) {
+        let title = if self.student.is_some_and(|s| s != id) {
+            format!("🎒 Élève changé : {}", name(lib, id))
+        } else {
+            format!("🎒 {}", name(lib, id))
+        };
+        self.student = Some(id);
+        self.input.clear();
+        self.focus_scan = true;
+        self.feedback = Some(Feedback::new(
+            theme::LEND_SOFT,
+            title,
+            "Scannez maintenant le livre qu'il ou elle emprunte.",
+        ));
     }
 
     fn lend(&mut self, store: &mut Store, book: u32, student: u32, today: NaiveDate) {
@@ -707,19 +706,20 @@ impl LoansView {
         match store.apply(|lib| lib.lend(book, student, date)) {
             Ok(loan) => {
                 let lib = store.lib();
+                // One loan per card scan: the next book needs a card scan again,
+                // so a forgotten card can never put a book on the previous pupil.
                 self.student = None;
-                self.book = None;
-                self.focus = Some(Field::Student);
                 self.last_action = Some(LastAction::Lent(loan));
                 self.feedback = Some(
                     Feedback::new(
-                        (theme::LEND, Color32::WHITE),
+                        Mode::Lend.done(),
                         "📤 Prêt enregistré",
                         format!(
-                            "{} emprunte {} ({}), le {}.{}",
-                            name(lib, student),
+                            "{} ({}) est prêté à {} le {}.{}\n\
+                             Livre suivant : scannez à nouveau une carte d'élève.",
                             title(lib, book),
                             book_code(book),
+                            name(lib, student),
                             format_date(date),
                             note_line(lib, book)
                         ),
@@ -733,24 +733,20 @@ impl LoansView {
         }
     }
 
-    /// The pupil stays chosen: the same pupil often returns a book, then
-    /// borrows another one.
     fn return_book(&mut self, store: &mut Store, book: u32, today: NaiveDate) {
         let Some(date) = self.date(today) else { return };
         match store.apply(|lib| lib.return_book(book, date)) {
             Ok(loan) => {
                 let lib = store.lib();
                 let (who, since, _) = loan_info(lib, loan, today);
-                self.book = None;
-                self.focus = Some(self.expected_field());
                 self.last_action = Some(LastAction::Returned(loan));
                 self.feedback = Some(
                     Feedback::new(
-                        (theme::RETURN, Color32::WHITE),
+                        Mode::Return.done(),
                         "📥 Retour enregistré",
                         format!(
-                            "{} ({}) est rendu par {who} (emprunté le {since}). \
-                             Il est de nouveau disponible.{}",
+                            "{} ({}) est rendu par {who} (emprunté le {since}).{}\n\
+                             Il est de nouveau disponible.",
                             title(lib, book),
                             book_code(book),
                             note_line(lib, book)
@@ -793,12 +789,12 @@ impl LoansView {
         self.feedback = Some(match (result, action) {
             (Err(e), _) => Feedback::new(theme::ERROR, "⚠ Impossible d'annuler", e.to_string()),
             (Ok(()), LastAction::Lent(_)) => Feedback::new(
-                theme::INFO,
+                self.mode.soft(),
                 "↩ Prêt annulé",
                 format!("{book} n'est plus prêté à {who}."),
             ),
             (Ok(()), LastAction::Returned(_)) => Feedback::new(
-                theme::INFO,
+                self.mode.soft(),
                 "↩ Retour annulé",
                 format!("{book} est de nouveau prêté à {who}."),
             ),
@@ -806,35 +802,11 @@ impl LoansView {
     }
 }
 
-/// Full-width coloured box under the two cards.
-fn banner(ui: &mut egui::Ui, (fill, _): Badge, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, theme::LINE))
-        .corner_radius(16)
-        .inner_margin(Margin::same(18))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui);
-        });
-}
-
-/// The arrow between the two cards: « the pupil ➡ borrows the book ». Blue
-/// only when that loan can be validated; a book that is out is not borrowed
-/// by the pupil on the left.
-fn arrow(ui: &egui::Ui, sides: egui::Rect, proposal: &Proposal) {
-    let fill = match proposal {
-        Proposal::Lend { .. } => theme::LEND,
-        Proposal::Return { .. } | Proposal::Incomplete => theme::LINE,
-    };
-    let center = egui::pos2(sides.center().x, sides.top() + 82.0);
-    let painter = ui.painter();
-    painter.circle_filled(center, 26.0, fill);
-    painter.text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        "➡",
-        FontId::proportional(28.0),
-        Color32::WHITE,
-    );
+/// Lower card in return mode.
+fn return_help(ui: &mut egui::Ui) {
+    ui.heading("📥 Comment rendre un livre ?");
+    ui.add_space(4.0);
+    ui.label("Scannez chaque livre rendu : c'est tout, le retour est enregistré tout de suite.");
+    ui.label("Une erreur ? Le bouton « Annuler ce retour » la répare.");
+    ui.label("Un livre à prêter ? Cliquez d'abord sur « 📤 Prêter un livre » en haut.");
 }
