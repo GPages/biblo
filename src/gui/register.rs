@@ -448,6 +448,11 @@ impl RegisterView {
                         info.publisher
                     ));
                 }
+                if info.title_garbled {
+                    text.push_str(
+                        " ⚠ Des caractères du titre sont illisibles dans la base : corrigez-le.",
+                    );
+                }
                 text.push_str(" Complétez l'auteur et la catégorie.");
                 self.focus = Some(BookField::Author);
                 Message::Ok(text)

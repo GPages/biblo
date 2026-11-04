@@ -24,6 +24,7 @@ pub mod labels;
 pub mod library;
 pub mod search;
 pub mod store;
+pub mod tidy;
 
 pub use error::Error;
 pub use library::{Book, BookInput, DeleteReport, Library, Loan, Student};

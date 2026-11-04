@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
+use crate::tidy::{is_garbled, tidy_title};
+
 const MAGIC: &[u8; 8] = b"BIBLOIX1";
 /// Magic, size and modification time of the CSV, number of records.
 const HEADER_LEN: u64 = 32;
@@ -61,7 +63,11 @@ fn io_err(e: io::Error) -> IsbnError {
 /// What the dataset says about a book (empty strings when unknown).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookInfo {
+    /// Tidied up (see `tidy`).
     pub title: String,
+    /// Some characters of the title were lost in the database and could not
+    /// be restored: it needs a look.
+    pub title_garbled: bool,
     pub publisher: String,
 }
 
@@ -393,8 +399,10 @@ impl IsbnDb {
         if field(self.columns.isbn) != isbn13 {
             return Ok(None);
         }
+        let title = tidy_title(field(self.columns.title));
         Ok(Some(BookInfo {
-            title: clean(field(self.columns.title)),
+            title_garbled: is_garbled(&title),
+            title,
             publisher: self
                 .columns
                 .publisher
@@ -497,6 +505,7 @@ mod tests {
             db.lookup("9782070612758").unwrap(),
             Some(BookInfo {
                 title: "Le Petit Prince".into(),
+                title_garbled: false,
                 publisher: "Gallimard".into()
             })
         );
