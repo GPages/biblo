@@ -10,6 +10,7 @@ use biblo::{BookInput, Library, Store};
 use eframe::egui::{self, Align, Layout, Margin, RichText};
 use egui_extras::{Column, TableBuilder};
 
+use super::isbn::{IsbnService, Lookup};
 use super::print_queue::PrintQueue;
 use super::{text_with_choices, theme, Message};
 
@@ -17,6 +18,15 @@ use super::{text_with_choices, theme, Message};
 enum Section {
     Books,
     Students,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BookField {
+    /// The ISBN when the database is there (scan the book first), else the title.
+    First,
+    Isbn,
+    Title,
+    Author,
 }
 
 pub struct RegisterView {
@@ -33,7 +43,14 @@ pub struct RegisterView {
     /// The author field is the one being filled in: its suggestions show.
     author_active: bool,
     book_message: Option<Message>,
-    focus_title: bool,
+    /// Field that gets the keyboard on the next frame.
+    focus: Option<BookField>,
+    /// What the ISBN lookup said.
+    isbn_message: Option<Message>,
+    /// Title and collection as the ISBN lookup filled them in: a new lookup
+    /// replaces them, but never something typed by hand.
+    filled_title: String,
+    filled_collection: String,
 
     book_labels: PrintQueue,
 
@@ -61,7 +78,10 @@ impl Default for RegisterView {
             copies: 1,
             author_active: false,
             book_message: None,
-            focus_title: false,
+            focus: None,
+            isbn_message: None,
+            filled_title: String::new(),
+            filled_collection: String::new(),
             book_labels: PrintQueue::new(Kind::Book),
             last_name: String::new(),
             first_name: String::new(),
@@ -83,7 +103,13 @@ fn scroll_column(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 impl RegisterView {
-    pub fn ui(&mut self, ui: &mut egui::Ui, store: &mut Store, data_dir: &Path) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &mut Store,
+        data_dir: &Path,
+        isbn: &IsbnService,
+    ) {
         ui.horizontal(|ui| {
             let section = &mut self.section;
             ui.selectable_value(section, Section::Books, "📖 Enregistrer des livres");
@@ -93,7 +119,7 @@ impl RegisterView {
         match self.section {
             Section::Books => ui.columns(2, |cols| {
                 scroll_column(&mut cols[0], "book_form_column", |ui| {
-                    theme::card(ui, |ui| self.book_form(ui, store));
+                    theme::card(ui, |ui| self.book_form(ui, store, isbn));
                 });
                 scroll_column(&mut cols[1], "book_labels_column", |ui| {
                     theme::card(ui, |ui| self.book_labels.ui(ui, store.lib(), data_dir));
@@ -116,18 +142,25 @@ impl RegisterView {
 
     // ------------------------------------------------------------ books
 
-    fn book_form(&mut self, ui: &mut egui::Ui, store: &mut Store) {
+    fn book_form(&mut self, ui: &mut egui::Ui, store: &mut Store, isbn: &IsbnService) {
         ui.heading("📖 Nouveau livre");
         ui.add_space(6.0);
         egui::Grid::new("book_form")
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
+                // Top-aligned: the message under the field makes this row taller.
+                ui.with_layout(Layout::top_down(Align::Min), |ui| ui.label("ISBN"));
+                self.isbn_field(ui, isbn);
+                ui.end_row();
                 ui.label("Titre *");
                 let title =
                     ui.add(egui::TextEdit::singleline(&mut self.title).desired_width(320.0));
-                if std::mem::take(&mut self.focus_title) {
+                if self.focus == Some(BookField::Title)
+                    || (self.focus == Some(BookField::First) && !isbn.is_ready())
+                {
                     title.request_focus();
+                    self.focus = None;
                 }
                 ui.end_row();
                 // Top-aligned: the suggestions make this row taller.
@@ -166,9 +199,6 @@ impl RegisterView {
                         .hint_text("aaaa")
                         .desired_width(60.0),
                 );
-                ui.end_row();
-                ui.label("ISBN");
-                ui.add(egui::TextEdit::singleline(&mut self.isbn).desired_width(200.0));
                 ui.end_row();
                 ui.label("Exemplaires");
                 ui.add(egui::DragValue::new(&mut self.copies).range(1..=100));
@@ -279,6 +309,10 @@ impl RegisterView {
                     // otherwise it moves to the next field as usual.
                     .lock_focus(completion.is_some()),
             );
+            if self.focus == Some(BookField::Author) {
+                field.request_focus();
+                self.focus = None;
+            }
             // Clicking a suggestion takes the focus away from the field: the
             // list stays until another field gets the focus.
             let focused = ui.memory(|m| m.focused());
@@ -338,7 +372,97 @@ impl RegisterView {
             field.clear();
         }
         self.copies = 1;
-        self.focus_title = true;
+        self.isbn_message = None;
+        self.filled_title.clear();
+        self.filled_collection.clear();
+        self.focus = Some(BookField::First);
+    }
+
+    /// The ISBN field: Enter (what the scanner sends) or the button fills in
+    /// the title and publisher from the ISBN database.
+    fn isbn_field(&mut self, ui: &mut egui::Ui, isbn: &IsbnService) {
+        ui.vertical(|ui| {
+            // As wide as the other fields: a long message wraps, instead of
+            // widening the whole form.
+            ui.set_max_width(400.0);
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.isbn)
+                        .hint_text("scannez le code-barres")
+                        .desired_width(220.0),
+                );
+                if self.focus == Some(BookField::Isbn)
+                    || (self.focus == Some(BookField::First) && isbn.is_ready())
+                {
+                    field.request_focus();
+                    self.focus = None;
+                }
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let button = ui.add_enabled(
+                    !self.isbn.trim().is_empty(),
+                    egui::Button::new("🔍 Remplir"),
+                );
+                if entered || button.clicked() {
+                    self.lookup_isbn(isbn);
+                }
+            });
+            if let Some(m) = &self.isbn_message {
+                m.show(ui);
+            }
+        });
+    }
+
+    /// Empties the title and collection if they still hold what the last
+    /// lookup filled in (not what was typed).
+    fn forget_filled(&mut self) {
+        if self.title == self.filled_title {
+            self.title.clear();
+        }
+        if self.collection == self.filled_collection {
+            self.collection.clear();
+        }
+        self.filled_title.clear();
+        self.filled_collection.clear();
+    }
+
+    fn lookup_isbn(&mut self, isbn: &IsbnService) {
+        self.isbn_message = Some(match isbn.lookup(&self.isbn) {
+            Lookup::Found { isbn: code, info } => {
+                self.isbn = code;
+                let mut text = if info.title.is_empty() {
+                    "Trouvé, mais sans titre : saisissez-le.".to_string()
+                } else {
+                    format!("Trouvé : « {} ».", info.title)
+                };
+                let title_filled = fill(&mut self.title, &mut self.filled_title, &info.title);
+                if !title_filled && !info.title.is_empty() {
+                    text.push_str(" (Le titre saisi a été gardé.)");
+                }
+                if fill(
+                    &mut self.collection,
+                    &mut self.filled_collection,
+                    &info.publisher,
+                ) {
+                    text.push_str(&format!(
+                        " Éditeur « {} » placé dans Collection.",
+                        info.publisher
+                    ));
+                }
+                text.push_str(" Complétez l'auteur et la catégorie.");
+                self.focus = Some(BookField::Author);
+                Message::Ok(text)
+            }
+            Lookup::NotFound { isbn: code } => {
+                self.isbn = code.clone();
+                // What an earlier lookup put in the form is another book's.
+                self.forget_filled();
+                self.focus = Some(BookField::Title);
+                Message::Err(format!(
+                    "ISBN {code} introuvable dans la base : remplissez les champs vous-même."
+                ))
+            }
+            Lookup::Unusable(message) => Message::Err(message),
+        });
     }
 
     /// `copy_of`: the existing book this one is a new copy of; its details
@@ -541,6 +665,18 @@ impl RegisterView {
                 });
             });
     }
+}
+
+/// Puts `value` in `field` unless something was typed there by hand: an empty
+/// field, or what the previous lookup put there, is replaced. Returns
+/// whether it was filled.
+fn fill(field: &mut String, previous: &mut String, value: &str) -> bool {
+    if value.is_empty() || !(field.trim().is_empty() || field == previous) {
+        return false;
+    }
+    *field = value.to_string();
+    *previous = value.to_string();
+    true
 }
 
 /// At most this many suggestions under the author field.

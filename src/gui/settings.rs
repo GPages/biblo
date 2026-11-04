@@ -1,7 +1,7 @@
 //! Settings (the ⚙ button at the far right of the header): go back to a
 //! backup of the data. Works even when the data file cannot be opened.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use biblo::dates::format_date;
 use biblo::store::{list_backups, read_library, restore_backup, Backup, BackupKind, BACKUP_DIR};
@@ -9,6 +9,7 @@ use biblo::Store;
 use chrono::{Datelike, Local, NaiveDate, Weekday};
 use eframe::egui::{self, Margin, RichText};
 
+use super::isbn::{IsbnService, Status};
 use super::{open_file, theme, Message};
 
 /// One line of the list: a backup and what it holds.
@@ -26,6 +27,23 @@ pub struct SettingsView {
     confirm: Option<usize>,
     message: Option<Message>,
     folder_message: Option<Message>,
+    /// The path being typed for the ISBN database (read from the settings
+    /// the first time).
+    isbn_path: Option<String>,
+    isbn_message: Option<Message>,
+}
+
+/// 8703397 → "8 703 397".
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{a0}');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn weekday(day: NaiveDate) -> &'static str {
@@ -85,6 +103,7 @@ impl SettingsView {
         ui: &mut egui::Ui,
         store: &mut Result<Store, String>,
         data_dir: &Path,
+        isbn: &mut IsbnService,
     ) -> bool {
         if self.rows.is_none() {
             match load_rows(data_dir) {
@@ -99,6 +118,8 @@ impl SettingsView {
         }
         let mut restored = false;
         egui::ScrollArea::vertical().show(ui, |ui| {
+            theme::card(ui, |ui| self.isbn_card(ui, isbn));
+            ui.add_space(14.0);
             theme::card(ui, |ui| {
                 ui.heading("💾 Sauvegardes des données");
                 ui.add_space(4.0);
@@ -132,6 +153,78 @@ impl SettingsView {
             theme::card(ui, |ui| self.folder(ui, data_dir));
         });
         restored
+    }
+
+    /// Where the ISBN database is, and whether it is ready.
+    fn isbn_card(&mut self, ui: &mut egui::Ui, isbn: &mut IsbnService) {
+        let typed = self.isbn_path.get_or_insert_with(|| {
+            isbn.path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        });
+        ui.heading("📚 Base de données ISBN");
+        ui.add_space(4.0);
+        ui.label(
+            "Pour remplir automatiquement le titre d'un livre à partir de son ISBN (onglet \
+             Enregistrer), indiquez le fichier CSV de la base, par exemple \
+             open4goods-isbn-dataset.csv. Le fichier n'est pas copié : il est lu là où il est \
+             (disque, clé USB…).",
+        );
+        let (mut save, mut remove) = (false, false);
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(typed)
+                    .hint_text(
+                        r"Chemin du fichier, par exemple C:\Biblo\open4goods-isbn-dataset.csv",
+                    )
+                    .desired_width(520.0),
+            );
+            save = ui
+                .add(theme::main_button("Enregistrer", theme::GREEN))
+                .clicked()
+                || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            remove = isbn.path().is_some() && ui.button("Retirer").clicked();
+        });
+        if save || remove {
+            // « Copier en tant que chemin » in Windows puts the path in quotes.
+            let path = typed.trim().trim_matches('"').trim().to_string();
+            let new = (!remove && !path.is_empty()).then(|| PathBuf::from(&path));
+            if remove {
+                typed.clear();
+            }
+            self.isbn_message = Some(match isbn.set_path(new) {
+                Ok(()) => Message::Ok("Réglage enregistré.".into()),
+                Err(e) => Message::Err(format!("Le réglage n'a pas pu être enregistré : {e}")),
+            });
+        }
+        if let Some(m) = &self.isbn_message {
+            m.show(ui);
+        }
+        match isbn.status() {
+            Status::NotConfigured => {
+                ui.weak("Aucune base configurée : le champ ISBN du formulaire ne remplit rien.");
+            }
+            Status::Preparing(fraction) => {
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .show_percentage()
+                        .desired_width(400.0),
+                );
+                ui.label(
+                    "Préparation de la base (une seule fois, de quelques secondes à quelques \
+                     minutes selon l'ordinateur). Biblo reste utilisable.",
+                );
+            }
+            Status::Ready { entries } => {
+                ui.colored_label(
+                    theme::GREEN,
+                    format!("✔ Base prête : {} livres connus.", thousands(entries)),
+                );
+            }
+            Status::Failed(message) => {
+                ui.colored_label(theme::RED, format!("⚠ {message}"));
+            }
+        }
     }
 
     /// Where everything is, to copy it to a USB key or to send the log.

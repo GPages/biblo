@@ -1,6 +1,7 @@
 //! Window shell: tabs, status bar, and helpers shared by the views.
 
 mod books;
+mod isbn;
 mod loans;
 mod print_queue;
 mod register;
@@ -35,6 +36,7 @@ pub struct App {
     late_days: i64,
     register: register::RegisterView,
     settings: settings::SettingsView,
+    isbn: isbn::IsbnService,
     /// Logged once: proof in `biblo.log` that the window really appeared.
     shown: bool,
 }
@@ -59,6 +61,7 @@ impl App {
             }
             Err(e) => format!("data unreadable: {e}"),
         });
+        let isbn = isbn::IsbnService::new(&data_dir);
         App {
             data_dir,
             store,
@@ -69,6 +72,7 @@ impl App {
             late_days: 21,
             register: register::RegisterView::default(),
             settings: settings::SettingsView::default(),
+            isbn,
             shown: false,
         }
     }
@@ -85,6 +89,7 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.isbn.poll(ui.ctx());
         if !std::mem::replace(&mut self.shown, true) {
             crate::journal::line("window shown");
         }
@@ -193,7 +198,10 @@ impl eframe::App for App {
             .inner_margin(Margin::same(16));
         egui::CentralPanel::default().frame(central).show(ui, |ui| {
             if self.view == View::Settings {
-                if self.settings.ui(ui, &mut self.store, &self.data_dir) {
+                if self
+                    .settings
+                    .ui(ui, &mut self.store, &self.data_dir, &mut self.isbn)
+                {
                     self.reset_views();
                 }
                 return;
@@ -230,7 +238,7 @@ impl App {
                 View::Loans => self.loans.ui(ui, store, self.late_days),
                 View::Books => self.books.ui(ui, store),
                 View::Students => self.students.ui(ui, store, &mut self.late_days),
-                View::Register => self.register.ui(ui, store, &self.data_dir),
+                View::Register => self.register.ui(ui, store, &self.data_dir, &self.isbn),
                 // Drawn before, even without data.
                 View::Settings => {}
             },
