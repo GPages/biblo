@@ -1,8 +1,9 @@
-//! Books or pupils waiting to be printed on the next A4 label sheet.
+//! Pupil cards waiting to be printed on the next A4 sheet. (Books have no
+//! label: their ISBN, printed on them, is what gets scanned.)
 
 use std::path::Path;
 
-use biblo::codes::{book_code, parse_code_or_number, student_code, Kind, Scanned};
+use biblo::codes::{parse_student, student_code};
 use biblo::dates::format_date;
 use biblo::labels::{self, Label};
 use biblo::{Error, Library};
@@ -10,53 +11,20 @@ use eframe::egui;
 
 use super::{barcode, open_file, theme, Message};
 
-/// The French texts that differ between book labels and pupil cards.
-struct Texts {
-    heading: &'static str,
-    auto_added: &'static str,
-    field: &'static str,
-    hint: &'static str,
-    wrong_kind: &'static str,
-    file_prefix: &'static str,
-    unit: &'static str,
-}
-
-fn texts(kind: Kind) -> Texts {
-    match kind {
-        Kind::Book => Texts {
-            heading: "🏷 Étiquettes de livres à imprimer",
-            auto_added: "Les livres enregistrés s'ajoutent ici automatiquement.",
-            field: "Réimprimer une étiquette, code du livre :",
-            hint: "L000123",
-            wrong_kind: "C'est un code d'élève, pas un code de livre.",
-            file_prefix: "etiquettes-livres",
-            unit: "étiquette(s)",
-        },
-        Kind::Student => Texts {
-            heading: "🎫 Cartes d'élèves à imprimer",
-            auto_added: "Les élèves enregistrés s'ajoutent ici automatiquement.",
-            field: "Ajouter une carte, code de l'élève :",
-            hint: "E000045",
-            wrong_kind: "C'est un code de livre, pas un code d'élève.",
-            file_prefix: "cartes-eleves",
-            unit: "carte(s)",
-        },
-    }
-}
+const HEADING: &str = "🎫 Cartes d'élèves à imprimer";
+const FILE_PREFIX: &str = "cartes-eleves";
 
 pub struct PrintQueue {
-    kind: Kind,
     ids: Vec<u32>,
     code_input: String,
-    /// Pupil cards: the class chosen to be added as a whole.
+    /// The class chosen to be added as a whole.
     class: String,
     message: Option<Message>,
 }
 
 impl PrintQueue {
-    pub fn new(kind: Kind) -> PrintQueue {
+    pub fn new() -> PrintQueue {
         PrintQueue {
-            kind,
             ids: Vec::new(),
             code_input: String::new(),
             class: String::new(),
@@ -79,53 +47,32 @@ impl PrintQueue {
         self.message = Some(message);
     }
 
-    fn code(&self, id: u32) -> String {
-        match self.kind {
-            Kind::Book => book_code(id),
-            Kind::Student => student_code(id),
-        }
-    }
-
     /// What gets printed for `id`; `None` if it no longer exists.
     fn label(&self, lib: &Library, id: u32) -> Option<Label> {
-        let caption = match self.kind {
-            Kind::Book => lib.book(id)?.title.clone(),
-            Kind::Student => {
-                let s = lib.student(id)?;
-                format!("{} ({})", s.full_name(), format_date(s.birth_date))
-            }
-        };
+        let s = lib.student(id)?;
         Some(Label {
-            code: self.code(id),
-            caption,
+            code: student_code(id),
+            caption: format!("{} ({})", s.full_name(), format_date(s.birth_date)),
         })
     }
 
-    /// Only existing pupils and non-archived books can be printed.
+    /// Only existing pupils can be printed.
     fn check(&self, lib: &Library, id: u32) -> Result<(), Error> {
-        match self.kind {
-            Kind::Book => match lib.book(id) {
-                None => Err(Error::BookNotFound(id)),
-                Some(b) if b.archived => Err(Error::BookArchived(id)),
-                Some(_) => Ok(()),
-            },
-            Kind::Student => match lib.student(id) {
-                None => Err(Error::StudentNotFound(id)),
-                Some(_) => Ok(()),
-            },
+        match lib.student(id) {
+            None => Err(Error::StudentNotFound(id)),
+            Some(_) => Ok(()),
         }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, lib: &Library, data_dir: &Path) {
-        let t = texts(self.kind);
-        ui.heading(format!("{} ({})", t.heading, self.ids.len()));
+        ui.heading(format!("{HEADING} ({})", self.ids.len()));
         ui.add_space(4.0);
-        ui.label(t.auto_added);
+        ui.label("Les élèves enregistrés s'ajoutent ici automatiquement.");
         ui.horizontal(|ui| {
-            ui.label(t.field);
+            ui.label("Ajouter une carte, code de l'élève :");
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.code_input)
-                    .hint_text(t.hint)
+                    .hint_text("E000045")
                     .desired_width(90.0),
             );
             // The scanner types the code then Enter: keep the focus for the next scan.
@@ -137,9 +84,7 @@ impl PrintQueue {
                 }
             }
         });
-        if self.kind == Kind::Student {
-            self.class_row(ui, lib);
-        }
+        self.class_row(ui, lib);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let has_items = !self.ids.is_empty();
@@ -239,24 +184,23 @@ impl PrintQueue {
         if input.trim().is_empty() {
             return;
         }
-        let id = match (self.kind, parse_code_or_number(&input, self.kind)) {
-            (_, None) => Err(format!("Code illisible : « {} ».", input.trim())),
-            (Kind::Book, Some(Scanned::Book(id))) | (Kind::Student, Some(Scanned::Student(id))) => {
-                self.check(lib, id).map(|_| id).map_err(|e| e.to_string())
-            }
-            _ => Err(texts(self.kind).wrong_kind.to_string()),
+        let id = match parse_student(&input) {
+            None => Err(format!(
+                "Code illisible : « {} ». Une carte d'élève s'écrit E000045.",
+                input.trim()
+            )),
+            Some(id) => self.check(lib, id).map(|_| id).map_err(|e| e.to_string()),
         };
         self.message = Some(match id {
             Err(text) => Message::Err(text),
             Ok(id) if self.push([id]) == 0 => {
-                Message::Err(format!("{} est déjà dans la liste.", self.code(id)))
+                Message::Err(format!("{} est déjà dans la liste.", student_code(id)))
             }
-            Ok(id) => Message::Ok(format!("{} ajouté à la liste.", self.code(id))),
+            Ok(id) => Message::Ok(format!("{} ajouté à la liste.", student_code(id))),
         });
     }
 
     fn make_sheet(&self, lib: &Library, data_dir: &Path) -> Message {
-        let t = texts(self.kind);
         let sheet: Vec<Label> = self
             .ids
             .iter()
@@ -266,7 +210,7 @@ impl PrintQueue {
         let dir = data_dir.join("etiquettes");
         let name = format!(
             "{}-{}.pdf",
-            t.file_prefix,
+            FILE_PREFIX,
             chrono::Local::now().format("%Y-%m-%d-%H%M%S")
         );
         let path = dir.join(name);
@@ -276,10 +220,9 @@ impl PrintQueue {
         }
         let pages = sheet.len().div_ceil(labels::LABELS_PER_PAGE);
         let mut text = format!(
-            "Feuille créée : {} {} sur {} page(s).\n{}\n\
+            "Feuille créée : {} carte(s) sur {} page(s).\n{}\n\
              Imprimez-la en taille réelle (100 %), sans « ajuster à la page ».",
             sheet.len(),
-            t.unit,
             pages,
             path.display()
         );

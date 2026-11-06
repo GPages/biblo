@@ -1,7 +1,6 @@
 //! Books tab: the list of books, filtered live as the user types, with a
-//! note on each copy (damaged, to repair…).
+//! note on each copy (damaged, to repair…). A book is shown by its ISBN.
 
-use biblo::codes::book_code;
 use biblo::dates::format_date;
 use biblo::search::{fold, Query};
 use biblo::{Book, Store};
@@ -18,10 +17,11 @@ enum Status {
     OnLoan,
 }
 
-/// The note being written for one copy.
+/// The note (and ISBN) being edited for one copy.
 struct NoteForm {
     book: u32,
     text: String,
+    isbn: String,
     focus: bool,
 }
 
@@ -36,7 +36,6 @@ pub struct BooksView {
 
 struct Row<'a> {
     book: &'a Book,
-    code: String,
     year: String,
     /// `None` when the book is on the shelf.
     loan: Option<String>,
@@ -49,7 +48,7 @@ impl BooksView {
                 ui.label(RichText::new("🔍").size(22.0));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("titre, auteur, catégorie, code, élève, note…")
+                        .hint_text("titre, auteur, catégorie, ISBN, élève, note…")
                         .desired_width(440.0),
                 );
                 if ui.button("Effacer").clicked() {
@@ -86,7 +85,6 @@ impl BooksView {
                 }
                 let row = Row {
                     book,
-                    code: book_code(book.id),
                     year: book.year.map(|y| y.to_string()).unwrap_or_default(),
                     loan: loan.map(|l| {
                         let who = lib
@@ -98,13 +96,12 @@ impl BooksView {
                 };
                 let status = row.loan.as_deref().unwrap_or("Disponible");
                 let fields = [
-                    row.code.as_str(),
+                    &book.isbn,
                     &book.title,
                     &book.author,
                     &book.collection,
                     &book.category,
                     &row.year,
-                    &book.isbn,
                     status,
                     &book.note,
                 ];
@@ -137,6 +134,7 @@ impl BooksView {
             self.note_form = Some(NoteForm {
                 book: book.id,
                 text: book.note.clone(),
+                isbn: book.isbn.clone(),
                 focus: true,
             });
             self.message = None;
@@ -152,7 +150,8 @@ impl BooksView {
             self.note_form = None;
             return;
         };
-        let what = format!("« {} » ({})", book.title, book_code(book.id));
+        let what = format!("« {} »", book.title);
+        let isbn_changed = |typed: &str| typed.trim() != book.isbn;
         let had_note = !book.note.is_empty();
         let (mut save, mut remove, mut cancel) = (false, false, false);
         egui::Frame::new()
@@ -162,7 +161,7 @@ impl BooksView {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    RichText::new(format!("📝 Note sur {what}"))
+                    RichText::new(format!("📝 Note et ISBN de {what}"))
                         .family(theme::bold())
                         .color(theme::NOTE.1),
                 );
@@ -176,8 +175,16 @@ impl BooksView {
                     field.request_focus();
                 }
                 ui.horizontal(|ui| {
+                    ui.label("ISBN :");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.isbn)
+                            .hint_text("13 chiffres, sous le code-barres")
+                            .desired_width(240.0),
+                    );
+                });
+                ui.horizontal(|ui| {
                     save = ui
-                        .add(theme::main_button("Enregistrer la note", theme::GREEN))
+                        .add(theme::main_button("Enregistrer", theme::GREEN))
                         .clicked();
                     if had_note {
                         remove = ui.button("Supprimer la note").clicked();
@@ -187,14 +194,29 @@ impl BooksView {
             });
         if save || remove {
             let (id, text) = (form.book, if remove { "" } else { form.text.as_str() });
-            let result = store.apply(|lib| lib.set_book_note(id, text));
-            let removed = store.lib().book(id).is_some_and(|b| b.note.is_empty());
-            self.message = Some(match result {
-                Err(e) => Message::Err(e.to_string()),
-                Ok(()) if removed => Message::Ok(format!("Note supprimée : {what}.")),
-                Ok(()) => Message::Ok(format!("Note enregistrée : {what}.")),
+            let new_isbn = (save && isbn_changed(&form.isbn)).then(|| form.isbn.clone());
+            let result = store.apply(|lib| {
+                // The ISBN first: if it is not valid, nothing changes.
+                if let Some(isbn) = &new_isbn {
+                    lib.set_book_isbn(id, isbn)?;
+                }
+                lib.set_book_note(id, text)
             });
-            self.note_form = None;
+            let removed = store.lib().book(id).is_some_and(|b| b.note.is_empty());
+            match result {
+                // Stay open: the error is shown under the form.
+                Err(e) => self.message = Some(Message::Err(e.to_string())),
+                Ok(()) => {
+                    self.message = Some(Message::Ok(if remove {
+                        format!("Note supprimée : {what}.")
+                    } else if removed {
+                        format!("Enregistré : {what}.")
+                    } else {
+                        format!("Note enregistrée : {what}.")
+                    }));
+                    self.note_form = None;
+                }
+            }
         } else if cancel {
             self.note_form = None;
         }
@@ -220,18 +242,16 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
         .column(Column::initial(110.0).at_least(60.0).clip(true))
         .column(Column::initial(120.0).at_least(60.0).clip(true))
         .column(Column::auto())
-        .column(Column::initial(75.0).at_least(50.0).clip(true))
         .column(Column::remainder().at_least(100.0).clip(true))
         .header(26.0, |mut header| {
             for title in [
                 "",
-                "Code",
+                "ISBN",
                 "Titre",
                 "Auteur",
                 "Collection",
                 "Catégorie",
                 "Année",
-                "ISBN",
                 "Statut",
             ] {
                 header.col(|ui| {
@@ -257,7 +277,12 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
                     }
                 });
                 table_row.col(|ui| {
-                    ui.monospace(&row.code);
+                    if row.book.isbn.is_empty() {
+                        // registered before the ISBN was required
+                        theme::badge(ui, "⚠ manquant", theme::ERROR);
+                    } else {
+                        ui.monospace(&row.book.isbn);
+                    }
                 });
                 table_row.col(|ui| {
                     if row.book.note.is_empty() {
@@ -288,9 +313,6 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
                 });
                 table_row.col(|ui| {
                     ui.label(&row.year);
-                });
-                table_row.col(|ui| {
-                    ui.label(&row.book.isbn);
                 });
                 table_row.col(|ui| match &row.loan {
                     None => theme::badge(ui, "Disponible", theme::AVAILABLE),

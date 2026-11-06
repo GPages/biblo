@@ -1,11 +1,12 @@
-//! Home screen: lend and take back books with the barcode scanner, or by
-//! typing codes and pupil names when the scanner does not work.
+//! Home screen: lend and take back books with the barcode scanner (a book is
+//! scanned by its ISBN, a pupil by the card), or by typing the ISBN, pupil
+//! names and book titles when the scanner does not work.
 //!
 //! Lending and returning are two modes, chosen with two big buttons and
 //! colour-coded all over the screen (blue: lend, orange: return). A scan
 //! only ever does what the current mode says.
 
-use biblo::codes::{book_code, student_code};
+use biblo::codes::student_code;
 use biblo::dates::{format_date, parse_date};
 use biblo::desk::{
     decide_lend, decide_return, find_books, find_students, LendDecision, ReturnDecision,
@@ -62,6 +63,9 @@ struct Feedback {
     undoable: bool,
     /// Offers to switch to this mode, when the scan was meant for it.
     switch_to: Option<Mode>,
+    /// Several copies of a book are out: one button per borrower, to say
+    /// whose copy came back (label, the copy's book id).
+    choices: Vec<(String, u32)>,
 }
 
 impl Feedback {
@@ -72,6 +76,7 @@ impl Feedback {
             detail: detail.into(),
             undoable: false,
             switch_to: None,
+            choices: Vec::new(),
         }
     }
 
@@ -82,6 +87,11 @@ impl Feedback {
 
     fn switch_to(mut self, mode: Mode) -> Feedback {
         self.switch_to = Some(mode);
+        self
+    }
+
+    fn choices(mut self, choices: Vec<(String, u32)>) -> Feedback {
+        self.choices = choices;
         self
     }
 }
@@ -183,7 +193,7 @@ impl LoansView {
             theme::outlined_card(ui, self.mode.color(), |ui| self.scan_card(ui, store, today));
             if let Some(colors) = self.feedback.as_ref().map(|f| f.colors) {
                 ui.add_space(12.0);
-                self.feedback_banner(ui, store, colors);
+                self.feedback_banner(ui, store, colors, today);
             }
             ui.add_space(12.0);
             theme::card(ui, |ui| match self.mode {
@@ -277,8 +287,8 @@ impl LoansView {
             }
         });
         ui.weak(match self.mode {
-            Mode::Lend => "Sans lecteur : tapez le code (E12, L345 ou juste le numéro) ou le nom de l'élève, puis Entrée.",
-            Mode::Return => "Sans lecteur : tapez le début du titre (les livres prêtés s'affichent) ou le code du livre (L345 ou juste le numéro).",
+            Mode::Lend => "Sans lecteur : tapez le nom de l'élève (ou son numéro de carte, E12), puis l'ISBN du livre, et Entrée.",
+            Mode::Return => "Sans lecteur : tapez le début du titre (les livres prêtés s'affichent) ou l'ISBN du livre, puis Entrée.",
         });
         if self.date_edited {
             let what = match self.mode {
@@ -352,7 +362,6 @@ impl LoansView {
                 {
                     chosen = Some(id);
                 }
-                ui.monospace(book_code(id));
                 ui.label(title(lib, id));
                 ui.weak(format!(
                     "prêté à {} depuis le {}",
@@ -399,8 +408,14 @@ impl LoansView {
         }
     }
 
-    fn feedback_banner(&mut self, ui: &mut egui::Ui, store: &mut Store, colors: Badge) {
-        let (mut undo, mut switch) = (false, None);
+    fn feedback_banner(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &mut Store,
+        colors: Badge,
+        today: NaiveDate,
+    ) {
+        let (mut undo, mut switch, mut chosen) = (false, None, None);
         egui::Frame::new()
             .fill(colors.0)
             .corner_radius(16)
@@ -434,6 +449,13 @@ impl LoansView {
                     ui.add_space(4.0);
                     undo = ui.button(undo_text).clicked();
                 }
+                for (label, book) in &f.choices {
+                    ui.add_space(4.0);
+                    let text = format!("📥 {label}");
+                    if ui.add(theme::main_button(&text, theme::RETURN)).clicked() {
+                        chosen = Some(*book);
+                    }
+                }
                 if let Some(mode) = f.switch_to {
                     ui.add_space(4.0);
                     let text = format!("Passer à « {} »", mode.title());
@@ -448,6 +470,10 @@ impl LoansView {
         }
         if let Some(mode) = switch {
             self.set_mode(mode);
+        }
+        if let Some(book) = chosen {
+            self.focus_scan = true;
+            self.return_book(store, book, today);
         }
     }
 
@@ -490,7 +516,6 @@ impl LoansView {
         for loan in loans {
             let days_out = loan.days_out(today);
             ui.horizontal(|ui| {
-                ui.monospace(book_code(loan.book_id));
                 ui.label(title(lib, loan.book_id));
                 ui.weak(format!(
                     "depuis le {} ({})",
@@ -558,20 +583,43 @@ impl LoansView {
             LendDecision::Nothing => {}
             LendDecision::SelectStudent(id) => self.select_student(lib, id),
             LendDecision::Lend { book, student } => self.lend(store, book, student, today),
-            LendDecision::AlreadyLent { book, loan } => {
-                let (who, since, out) = loan_info(lib, loan, today);
+            LendDecision::AllLent { book, loans } => {
+                let borrowers: Vec<String> = loans
+                    .iter()
+                    .map(|&loan| {
+                        let (who, since, out) = loan_info(lib, loan, today);
+                        format!("{who}, depuis le {since} ({out})")
+                    })
+                    .collect();
+                let (heading, who) = match borrowers.as_slice() {
+                    [one] => (
+                        format!("⚠ {} est déjà prêté", title(lib, book)),
+                        format!("à {one}."),
+                    ),
+                    many => (
+                        format!(
+                            "⚠ Les {} exemplaires de {} sont prêtés",
+                            many.len(),
+                            title(lib, book)
+                        ),
+                        format!("à {}.", many.join(" ; ")),
+                    ),
+                };
                 self.feedback = Some(
                     Feedback::new(
                         theme::ERROR,
-                        format!("⚠ {} est déjà prêté", title(lib, book)),
+                        heading,
                         format!(
-                            "à {who}, depuis le {since} ({out}). S'il vient d'être rendu, \
-                             enregistrez d'abord son retour avec « {} ».",
+                            "{who} S'il vient d'être rendu, enregistrez d'abord son retour \
+                             avec « {} ».",
                             Mode::Return.title()
                         ),
                     )
                     .switch_to(Mode::Return),
                 );
+            }
+            LendDecision::UnknownBook(isbn) => {
+                self.feedback = Some(unknown_book(&isbn));
             }
             LendDecision::NeedStudent { book } => {
                 self.feedback = Some(Feedback::new(
@@ -614,6 +662,32 @@ impl LoansView {
         match decision {
             ReturnDecision::Nothing => {}
             ReturnDecision::Return { book, .. } => self.return_book(store, book, today),
+            ReturnDecision::UnknownBook(isbn) => {
+                self.feedback = Some(unknown_book(&isbn));
+            }
+            ReturnDecision::ChooseLoan { book, loans } => {
+                // The scan cannot tell which copy it is: the borrower can.
+                let choices = loans
+                    .iter()
+                    .filter_map(|&loan| {
+                        let copy = lib.loans().iter().find(|l| l.id == loan)?.book_id;
+                        let (who, since, _) = loan_info(lib, loan, today);
+                        Some((format!("Rendu par {who} (depuis le {since})"), copy))
+                    })
+                    .collect();
+                self.feedback = Some(
+                    Feedback::new(
+                        theme::RETURN_SOFT,
+                        format!(
+                            "{} : {} exemplaires sont prêtés",
+                            title(lib, book),
+                            loans.len()
+                        ),
+                        "Qui rend le livre ? Cliquez sur l'élève.",
+                    )
+                    .choices(choices),
+                );
+            }
             ReturnDecision::NotLent { book } => {
                 self.feedback = Some(
                     Feedback::new(
@@ -715,10 +789,9 @@ impl LoansView {
                         Mode::Lend.done(),
                         "📤 Prêt enregistré",
                         format!(
-                            "{} ({}) est prêté à {} le {}.{}\n\
+                            "{} est prêté à {} le {}.{}\n\
                              Livre suivant : scannez à nouveau une carte d'élève.",
                             title(lib, book),
-                            book_code(book),
                             name(lib, student),
                             format_date(date),
                             note_line(lib, book)
@@ -745,10 +818,9 @@ impl LoansView {
                         Mode::Return.done(),
                         "📥 Retour enregistré",
                         format!(
-                            "{} ({}) est rendu par {who} (emprunté le {since}).{}\n\
+                            "{} est rendu par {who} (emprunté le {since}).{}\n\
                              Il est de nouveau disponible.",
                             title(lib, book),
-                            book_code(book),
                             note_line(lib, book)
                         ),
                     )
@@ -800,6 +872,18 @@ impl LoansView {
             ),
         });
     }
+}
+
+/// A valid ISBN that no book of the library has.
+fn unknown_book(isbn: &str) -> Feedback {
+    Feedback::new(
+        theme::ERROR,
+        "⚠ Ce livre n'est pas dans la bibliothèque",
+        format!(
+            "ISBN {isbn} : aucun livre enregistré avec ce code. Enregistrez-le d'abord dans \
+             l'onglet « Enregistrer » (Enregistrer des livres)."
+        ),
+    )
 }
 
 /// Lower card in return mode.

@@ -436,6 +436,27 @@ impl IsbnDb {
     }
 }
 
+/// A valid ISBN-13 derived from `seed`, for tests: the same seed gives the
+/// same ISBN (copies of one book), different seeds give different ones.
+#[cfg(test)]
+pub fn test_isbn(seed: &str) -> String {
+    let hash = seed.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let mut digits: Vec<u32> = vec![9, 7, 8];
+    digits.extend(
+        format!("{:09}", hash % 1_000_000_000)
+            .chars()
+            .filter_map(|c| c.to_digit(10)),
+    );
+    let check = ean13_check(&digits);
+    digits.push(check);
+    digits
+        .iter()
+        .filter_map(|&d| char::from_digit(d, 10))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,14 +2,18 @@ use std::fmt;
 
 use chrono::NaiveDate;
 
-use crate::codes::{book_code, student_code};
+use crate::codes::student_code;
 use crate::dates::format_date;
+use crate::isbn::IsbnError;
 
 /// Erreurs métier et techniques. Les messages (`Display`) sont en français
 /// et destinés à être affichés tels quels à l'utilisateur.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     EmptyTitle,
+    /// Un livre s'identifie par son ISBN : il est obligatoire.
+    IsbnRequired,
+    InvalidIsbn(IsbnError),
     EmptyLastName,
     EmptyFirstName,
     InvalidYear(i32),
@@ -24,7 +28,10 @@ pub enum Error {
     /// Archivage refusé : le livre est actuellement emprunté.
     BookOnLoan(u32),
     /// Archivage refusé : l'élève a encore des livres.
-    StudentHasLoans { student: u32, count: usize },
+    StudentHasLoans {
+        student: u32,
+        count: usize,
+    },
     DuplicateStudent {
         last_name: String,
         first_name: String,
@@ -40,25 +47,23 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::EmptyTitle => write!(f, "Le titre est obligatoire."),
+            Error::IsbnRequired => write!(
+                f,
+                "L'ISBN est obligatoire : scannez le code-barres du livre (13 chiffres) ou tapez-le."
+            ),
+            Error::InvalidIsbn(e) => write!(f, "{e}"),
             Error::EmptyLastName => write!(f, "Le nom est obligatoire."),
             Error::EmptyFirstName => write!(f, "Le prénom est obligatoire."),
             Error::InvalidYear(y) => write!(f, "Année de parution invalide : {y}."),
-            Error::BookNotFound(id) => write!(f, "Livre introuvable : {}.", book_code(*id)),
+            Error::BookNotFound(_) => write!(f, "Livre introuvable."),
             Error::StudentNotFound(id) => write!(f, "Élève introuvable : {}.", student_code(*id)),
             Error::LoanNotFound(id) => write!(f, "Emprunt introuvable (n°{id})."),
-            Error::BookArchived(id) => {
-                write!(f, "Le livre {} a été retiré du catalogue.", book_code(*id))
-            }
-            Error::AlreadyBorrowed(id) => {
-                write!(f, "Le livre {} est déjà emprunté.", book_code(*id))
-            }
-            Error::NotBorrowed(id) => {
-                write!(f, "Le livre {} n'est pas emprunté.", book_code(*id))
-            }
-            Error::BookOnLoan(id) => write!(
+            Error::BookArchived(_) => write!(f, "Ce livre a été retiré du catalogue."),
+            Error::AlreadyBorrowed(_) => write!(f, "Ce livre est déjà emprunté."),
+            Error::NotBorrowed(_) => write!(f, "Ce livre n'est pas emprunté."),
+            Error::BookOnLoan(_) => write!(
                 f,
-                "Le livre {} est actuellement emprunté : retour d'abord.",
-                book_code(*id)
+                "Ce livre est actuellement emprunté : enregistrez d'abord son retour."
             ),
             Error::StudentHasLoans { student, count } => write!(
                 f,

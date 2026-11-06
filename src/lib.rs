@@ -6,7 +6,7 @@
 //! - `dates`   : lecture/affichage strict des dates (jj/mm/aaaa)
 //! - `search`  : filtrage instantané, sans tenir compte des majuscules ni des accents
 //! - `code128` : encodage des codes-barres Code 128
-//! - `labels`  : planches d'étiquettes A4 au format PDF
+//! - `labels`  : planches A4 au format PDF (cartes d'élèves)
 //! - `desk`    : interprétation d'un scan au poste de prêt
 //! - `isbn`    : recherche d'un livre par son ISBN dans une base CSV
 //! - `config`  : réglages enregistrés (chemin de la base ISBN)

@@ -12,7 +12,7 @@ use crate::dates::parse_date;
 use crate::error::Error;
 use crate::library::{BookInput, Library};
 
-/// Title, author, collection, category, year, number of copies.
+/// Title, author, collection, category, year, number of copies, ISBN.
 pub type DemoBook = (
     &'static str,
     &'static str,
@@ -20,57 +20,59 @@ pub type DemoBook = (
     &'static str,
     Option<i32>,
     usize,
+    // ISBN-13: real ones where the dataset has the book, else invented (979-10).
+    &'static str,
 );
 
 #[rustfmt::skip] // one book per line reads better
 pub const BOOKS: &[DemoBook] = &[
-    ("Le Petit Prince", "Antoine de Saint-Exupéry", "Folio Junior", "Roman", Some(1943), 3),
-    ("Le Petit Nicolas", "René Goscinny, Jean-Jacques Sempé", "Folio Junior", "Roman", Some(1960), 2),
-    ("Les Récrés du petit Nicolas", "René Goscinny, Jean-Jacques Sempé", "Folio Junior", "Roman", Some(1961), 1),
-    ("Charlie et la chocolaterie", "Roald Dahl", "Folio Junior", "Roman", Some(1964), 2),
-    ("Matilda", "Roald Dahl", "Folio Junior", "Roman", Some(1988), 1),
-    ("Le Bon Gros Géant", "Roald Dahl", "Folio Junior", "Roman", Some(1982), 1),
-    ("Sacrées sorcières", "Roald Dahl", "Folio Junior", "Roman", Some(1983), 1),
-    ("Fantastique Maître Renard", "Roald Dahl", "Folio Cadet", "Roman", Some(1970), 1),
-    ("La Sorcière de la rue Mouffetard", "Pierre Gripari", "Folio Junior", "Conte", Some(1967), 2),
-    ("Les Contes du chat perché", "Marcel Aymé", "Folio Junior", "Conte", Some(1939), 1),
-    ("Harry Potter à l'école des sorciers", "J. K. Rowling", "Folio Junior", "Roman", Some(1998), 2),
-    ("Journal d'un dégonflé", "Jeff Kinney", "Seuil Jeunesse", "Roman", None, 2),
-    ("Mortelle Adèle : Tout ça finira mal", "Mr Tan, Miss Prickly", "Tourbillon", "BD", Some(2012), 2),
-    ("Les Cahiers d'Esther : Histoires de mes 10 ans", "Riad Sattouf", "Allary", "BD", Some(2016), 1),
-    ("Tintin au Tibet", "Hergé", "Les Aventures de Tintin", "BD", Some(1960), 1),
-    ("On a marché sur la Lune", "Hergé", "Les Aventures de Tintin", "BD", Some(1954), 1),
-    ("Le Lotus bleu", "Hergé", "Les Aventures de Tintin", "BD", Some(1936), 1),
-    ("Astérix le Gaulois", "René Goscinny, Albert Uderzo", "Astérix", "BD", Some(1961), 1),
-    ("Astérix et Cléopâtre", "René Goscinny, Albert Uderzo", "Astérix", "BD", Some(1965), 1),
-    ("L'Élève Ducobu", "Zidrou, Godi", "L'Élève Ducobu", "BD", None, 1),
-    ("Max et Lili ont peur", "Dominique de Saint Mars, Serge Bloch", "Max et Lili", "Album", None, 1),
-    ("Max et Lili se disputent", "Dominique de Saint Mars, Serge Bloch", "Max et Lili", "Album", None, 1),
-    ("Le Loup qui voulait changer de couleur", "Orianne Lallemand, Éléonore Thuillier", "Auzou", "Album", Some(2009), 1),
-    ("Le Monstre des couleurs", "Anna Llenas", "Quatre Fleuves", "Album", None, 1),
-    ("Le Gruffalo", "Julia Donaldson, Axel Scheffler", "Gallimard Jeunesse", "Album", Some(1999), 1),
-    ("Les Trois Brigands", "Tomi Ungerer", "L'École des loisirs", "Album", None, 1),
-    ("Ernest et Célestine ont perdu Siméon", "Gabrielle Vincent", "Casterman", "Album", Some(1981), 1),
-    ("La Petite Poule qui voulait voir la mer", "Christian Jolibois, Christian Heinrich", "Pocket Jeunesse", "Album", Some(2000), 1),
-    ("Chien Pourri !", "Colas Gutman, Marc Boutavant", "L'École des loisirs", "Roman", Some(2013), 1),
-    ("Le Prince de Motordu", "Pef", "Folio Benjamin", "Album", Some(1980), 1),
-    ("Mademoiselle Zazie a-t-elle un zizi ?", "Thierry Lenain, Delphine Durand", "Nathan", "Roman", Some(1998), 1),
-    ("Le Hollandais sans peine", "Marie-Aude Murail", "L'École des loisirs", "Roman", Some(1989), 1),
-    ("L'Enfant et la Rivière", "Henri Bosco", "Folio Junior", "Roman", Some(1945), 1),
-    ("L'Œil du loup", "Daniel Pennac", "Pocket Jeunesse", "Roman", Some(1984), 1),
-    ("Cabot-Caboche", "Daniel Pennac", "Pocket Jeunesse", "Roman", Some(1982), 1),
-    ("Le Livre de la jungle", "Rudyard Kipling", "Folio Junior", "Roman", Some(1894), 1),
-    ("Alice au pays des merveilles", "Lewis Carroll", "Folio Junior", "Roman", Some(1865), 1),
-    ("Le Tour du monde en quatre-vingts jours", "Jules Verne", "Folio Junior", "Roman", None, 1),
-    ("Les Malheurs de Sophie", "Comtesse de Ségur", "Bibliothèque Rose", "Roman", None, 1),
-    ("Le Club des Cinq et le trésor de l'île", "Enid Blyton", "Bibliothèque Rose", "Roman", None, 1),
-    ("Le Journal de Gurty : Vacances en Provence", "Bertrand Santini", "Sarbacane", "Roman", None, 1),
-    ("Fables", "Jean de La Fontaine", "", "Poésie", Some(1668), 1),
-    // Documentaries: no author, to show that only the title is required.
-    ("Les Dinosaures", "", "", "Documentaire", None, 1),
-    ("Le Corps humain", "", "", "Documentaire", None, 1),
-    ("Les Volcans", "", "", "Documentaire", None, 1),
-    ("Le Système solaire", "", "", "Documentaire", None, 1),
+    ("Le Petit Prince", "Antoine de Saint-Exupéry", "Folio Junior", "Roman", Some(1943), 3, "9782075216364"),
+    ("Le Petit Nicolas", "René Goscinny, Jean-Jacques Sempé", "Folio Junior", "Roman", Some(1960), 2, "9782075126885"),
+    ("Les Récrés du petit Nicolas", "René Goscinny, Jean-Jacques Sempé", "Folio Junior", "Roman", Some(1961), 1, "9782070513352"),
+    ("Charlie et la chocolaterie", "Roald Dahl", "Folio Junior", "Roman", Some(1964), 2, "9782070536771"),
+    ("Matilda", "Roald Dahl", "Folio Junior", "Roman", Some(1988), 1, "9782070512546"),
+    ("Le Bon Gros Géant", "Roald Dahl", "Folio Junior", "Roman", Some(1982), 1, "9782070513727"),
+    ("Sacrées sorcières", "Roald Dahl", "Folio Junior", "Roman", Some(1983), 1, "9782070576975"),
+    ("Fantastique Maître Renard", "Roald Dahl", "Folio Cadet", "Roman", Some(1970), 1, "9782070552689"),
+    ("La Sorcière de la rue Mouffetard", "Pierre Gripari", "Folio Junior", "Conte", Some(1967), 2, "9791000000015"),
+    ("Les Contes du chat perché", "Marcel Aymé", "Folio Junior", "Conte", Some(1939), 1, "9782070457021"),
+    ("Harry Potter à l'école des sorciers", "J. K. Rowling", "Folio Junior", "Roman", Some(1998), 2, "9791000000022"),
+    ("Journal d'un dégonflé", "Jeff Kinney", "Seuil Jeunesse", "Roman", None, 2, "9791000000039"),
+    ("Mortelle Adèle : Tout ça finira mal", "Mr Tan, Miss Prickly", "Tourbillon", "BD", Some(2012), 2, "9791000000046"),
+    ("Les Cahiers d'Esther : Histoires de mes 10 ans", "Riad Sattouf", "Allary", "BD", Some(2016), 1, "9791000000053"),
+    ("Tintin au Tibet", "Hergé", "Les Aventures de Tintin", "BD", Some(1960), 1, "9782203012011"),
+    ("On a marché sur la Lune", "Hergé", "Les Aventures de Tintin", "BD", Some(1954), 1, "9782203012080"),
+    ("Le Lotus bleu", "Hergé", "Les Aventures de Tintin", "BD", Some(1936), 1, "9782203020047"),
+    ("Astérix le Gaulois", "René Goscinny, Albert Uderzo", "Astérix", "BD", Some(1961), 1, "9782014001150"),
+    ("Astérix et Cléopâtre", "René Goscinny, Albert Uderzo", "Astérix", "BD", Some(1965), 1, "9782205001570"),
+    ("L'Élève Ducobu", "Zidrou, Godi", "L'Élève Ducobu", "BD", None, 1, "9782803636259"),
+    ("Max et Lili ont peur", "Dominique de Saint Mars, Serge Bloch", "Max et Lili", "Album", None, 1, "9782884451895"),
+    ("Max et Lili se disputent", "Dominique de Saint Mars, Serge Bloch", "Max et Lili", "Album", None, 1, "9791000000060"),
+    ("Le Loup qui voulait changer de couleur", "Orianne Lallemand, Éléonore Thuillier", "Auzou", "Album", Some(2009), 1, "9782733877159"),
+    ("Le Monstre des couleurs", "Anna Llenas", "Quatre Fleuves", "Album", None, 1, "9791000000077"),
+    ("Le Gruffalo", "Julia Donaldson, Axel Scheffler", "Gallimard Jeunesse", "Album", Some(1999), 1, "9791000000084"),
+    ("Les Trois Brigands", "Tomi Ungerer", "L'École des loisirs", "Album", None, 1, "9782211089647"),
+    ("Ernest et Célestine ont perdu Siméon", "Gabrielle Vincent", "Casterman", "Album", Some(1981), 1, "9782203063723"),
+    ("La Petite Poule qui voulait voir la mer", "Christian Jolibois, Christian Heinrich", "Pocket Jeunesse", "Album", Some(2000), 1, "9782266290210"),
+    ("Chien Pourri !", "Colas Gutman, Marc Boutavant", "L'École des loisirs", "Roman", Some(2013), 1, "9782211344692"),
+    ("Le Prince de Motordu", "Pef", "Folio Benjamin", "Album", Some(1980), 1, "9791000000091"),
+    ("Mademoiselle Zazie a-t-elle un zizi ?", "Thierry Lenain, Delphine Durand", "Nathan", "Roman", Some(1998), 1, "9782092824535"),
+    ("Le Hollandais sans peine", "Marie-Aude Murail", "L'École des loisirs", "Roman", Some(1989), 1, "9782211201346"),
+    ("L'Enfant et la Rivière", "Henri Bosco", "Folio Junior", "Roman", Some(1945), 1, "9782075137782"),
+    ("L'Œil du loup", "Daniel Pennac", "Pocket Jeunesse", "Roman", Some(1984), 1, "9782266294003"),
+    ("Cabot-Caboche", "Daniel Pennac", "Pocket Jeunesse", "Roman", Some(1982), 1, "9782266199667"),
+    ("Le Livre de la jungle", "Rudyard Kipling", "Folio Junior", "Roman", Some(1894), 1, "9791000000107"),
+    ("Alice au pays des merveilles", "Lewis Carroll", "Folio Junior", "Roman", Some(1865), 1, "9782070634156"),
+    ("Le Tour du monde en quatre-vingts jours", "Jules Verne", "Folio Junior", "Roman", None, 1, "9782075097543"),
+    ("Les Malheurs de Sophie", "Comtesse de Ségur", "Bibliothèque Rose", "Roman", None, 1, "9782013217576"),
+    ("Le Club des Cinq et le trésor de l'île", "Enid Blyton", "Bibliothèque Rose", "Roman", None, 1, "9782010181740"),
+    ("Le Journal de Gurty : Vacances en Provence", "Bertrand Santini", "Sarbacane", "Roman", None, 1, "9791000000114"),
+    ("Fables", "Jean de La Fontaine", "", "Poésie", Some(1668), 1, "9791000000121"),
+    // Documentaries: no author, to show that only the title and ISBN are required.
+    ("Les Dinosaures", "", "", "Documentaire", None, 1, "9791000000138"),
+    ("Le Corps humain", "", "", "Documentaire", None, 1, "9791000000145"),
+    ("Les Volcans", "", "", "Documentaire", None, 1, "9791000000152"),
+    ("Le Système solaire", "", "", "Documentaire", None, 1, "9791000000169"),
 ];
 
 /// Last name, first name, birth date (fictional pupils, CP to CM2).
@@ -168,14 +170,14 @@ fn is_library_day(d: NaiveDate) -> bool {
 
 /// Fills an empty library with the demo books, pupils and loans.
 pub fn fill(lib: &mut Library, today: NaiveDate) -> Result<(), Error> {
-    for &(title, author, collection, category, year, copies) in BOOKS {
+    for &(title, author, collection, category, year, copies, isbn) in BOOKS {
         let input = BookInput {
             title: title.into(),
             author: author.into(),
             collection: collection.into(),
             category: category.into(),
             year,
-            isbn: String::new(),
+            isbn: isbn.into(),
         };
         let ids = lib.add_copies(input, copies)?;
         if let (Some(&(_, note)), Some(&id)) = (NOTES.iter().find(|n| n.0 == title), ids.last()) {

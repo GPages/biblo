@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::isbn::normalize as normalize_isbn;
 use crate::search::fold;
 
 pub const CURRENT_VERSION: u32 = 1;
@@ -44,27 +45,11 @@ fn class_rank(key: &str) -> usize {
         .unwrap_or(LEVELS.len())
 }
 
-/// Clé de comparaison des titres et auteurs : sans casse, accents ni
-/// ponctuation (« L’Œil du loup ! » = « l'oeil du loup »).
-fn title_key(s: &str) -> String {
-    let letters: String = fold(s)
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect();
-    clean_text(&letters)
-}
-
-/// ISBN sans tirets ni espaces.
-fn isbn_key(s: &str) -> String {
-    s.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
-}
-
 // ---------------------------------------------------------------- Livres
 
-/// Données saisies pour créer ou modifier un livre. Seul le titre est obligatoire.
+/// Données saisies pour créer ou modifier un livre. Le titre et l'ISBN sont
+/// obligatoires : l'ISBN (le code-barres imprimé sur le livre) est ce qu'on
+/// scanne pour les prêts et les retours.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookInput {
     pub title: String,
@@ -74,6 +59,7 @@ pub struct BookInput {
     pub category: String,
     /// Année de parution (stricte : 4 chiffres, `MIN_YEAR..=MAX_YEAR`).
     pub year: Option<i32>,
+    /// ISBN-10 ou ISBN-13, avec ou sans tirets ; conservé en ISBN-13.
     pub isbn: String,
 }
 
@@ -84,6 +70,10 @@ impl BookInput {
         if title.is_empty() {
             return Err(Error::EmptyTitle);
         }
+        if self.isbn.trim().is_empty() {
+            return Err(Error::IsbnRequired);
+        }
+        let isbn = normalize_isbn(&self.isbn).map_err(Error::InvalidIsbn)?;
         if let Some(y) = self.year {
             if !(MIN_YEAR..=MAX_YEAR).contains(&y) {
                 return Err(Error::InvalidYear(y));
@@ -95,7 +85,7 @@ impl BookInput {
             collection: clean_text(&self.collection),
             category: clean_text(&self.category),
             year: self.year,
-            isbn: clean_text(&self.isbn),
+            isbn,
         })
     }
 
@@ -303,7 +293,8 @@ impl Library {
         Ok(ids)
     }
 
-    /// `copies` exemplaires du même titre, chacun avec son propre code-barres.
+    /// `copies` exemplaires du même livre : ils ont le même ISBN, et chacun
+    /// son propre prêt.
     pub fn add_copies(&mut self, input: BookInput, copies: usize) -> Result<Vec<u32>, Error> {
         self.add_books(vec![input; copies])
     }
@@ -577,27 +568,56 @@ impl Library {
             .collect()
     }
 
-    /// Livres (non archivés) qui semblent être le même livre que `input` :
-    /// même ISBN, ou même titre et même auteur (un auteur vide ne départage
-    /// pas). Sert à prévenir avant un doublon ; un nouvel exemplaire reste
-    /// possible avec `add_book`.
-    pub fn same_books(&self, input: &BookInput) -> Vec<u32> {
-        let isbn = isbn_key(&input.isbn);
-        let title = title_key(&input.title);
-        let author = title_key(&input.author);
+    /// Exemplaires (non archivés) du livre qui a cet ISBN (ISBN-10 ou 13,
+    /// tel qu'écrit ou scanné), dans l'ordre d'enregistrement ; rien si ce
+    /// n'est pas un ISBN valide.
+    pub fn copies_of(&self, isbn: &str) -> Vec<u32> {
+        let Ok(isbn) = normalize_isbn(isbn) else {
+            return Vec::new();
+        };
         self.books
             .iter()
-            .filter(|b| !b.archived)
-            .filter(|b| {
-                let same_isbn = !isbn.is_empty() && isbn_key(&b.isbn) == isbn;
-                let other_author = title_key(&b.author);
-                let same_author =
-                    author.is_empty() || other_author.is_empty() || other_author == author;
-                let same_title = !title.is_empty() && title_key(&b.title) == title;
-                same_isbn || (same_title && same_author)
-            })
+            .filter(|b| !b.archived && b.isbn == isbn)
             .map(|b| b.id)
             .collect()
+    }
+
+    /// Livres (non archivés) qui ont le même ISBN que `input` : sert à
+    /// prévenir avant un doublon ; un nouvel exemplaire reste possible avec
+    /// `add_book`.
+    pub fn same_books(&self, input: &BookInput) -> Vec<u32> {
+        self.copies_of(&input.isbn)
+    }
+
+    /// Un exemplaire de cet ISBN qui n'est pas emprunté (le premier).
+    pub fn free_copy_of(&self, isbn: &str) -> Option<u32> {
+        self.copies_of(isbn)
+            .into_iter()
+            .find(|&id| self.open_loan_for_book(id).is_none())
+    }
+
+    /// Les emprunts en cours des exemplaires de cet ISBN.
+    pub fn open_loans_for_isbn(&self, isbn: &str) -> Vec<&Loan> {
+        self.copies_of(isbn)
+            .into_iter()
+            .filter_map(|id| self.open_loan_for_book(id))
+            .collect()
+    }
+
+    /// Change l'ISBN d'un exemplaire (pour les livres enregistrés avant que
+    /// l'ISBN ne soit obligatoire).
+    pub fn set_book_isbn(&mut self, id: u32, isbn: &str) -> Result<(), Error> {
+        if isbn.trim().is_empty() {
+            return Err(Error::IsbnRequired);
+        }
+        let isbn = normalize_isbn(isbn).map_err(Error::InvalidIsbn)?;
+        let book = self
+            .books
+            .iter_mut()
+            .find(|b| b.id == id)
+            .ok_or(Error::BookNotFound(id))?;
+        book.isbn = isbn;
+        Ok(())
     }
 
     /// Catégories déjà utilisées (livres non archivés), sans doublon de casse
@@ -731,6 +751,7 @@ mod tests {
     fn book(title: &str) -> BookInput {
         BookInput {
             title: title.to_string(),
+            isbn: crate::isbn::test_isbn(title),
             ..Default::default()
         }
     }
@@ -743,6 +764,7 @@ mod tests {
             .add_book(BookInput {
                 title: "  Le  Petit   Prince ".into(),
                 author: " Saint-Exupéry ".into(),
+                isbn: crate::isbn::test_isbn("Le Petit Prince"),
                 ..Default::default()
             })
             .unwrap();
@@ -1130,6 +1152,7 @@ mod tests {
             .add_book(BookInput {
                 title: "A".into(),
                 year: Some(2019),
+                isbn: crate::isbn::test_isbn("A"),
                 ..Default::default()
             })
             .unwrap();
@@ -1149,6 +1172,7 @@ mod tests {
             .add_book(BookInput {
                 title: "Tintin au Tibet".into(),
                 category: "  Bande   dessinée ".into(),
+                isbn: crate::isbn::test_isbn("Tintin au Tibet"),
                 ..Default::default()
             })
             .unwrap();
@@ -1222,6 +1246,7 @@ mod tests {
                 author: "Roald Dahl".into(),
                 category: "Roman".into(),
                 year: Some(1988),
+                isbn: "978-2-07-061275-8".into(),
                 ..Default::default()
             })
             .unwrap();
@@ -1238,36 +1263,95 @@ mod tests {
                 collection: "Folio Junior".into(),
                 category: "Roman".into(),
                 year: Some(1988),
-                isbn: String::new(),
+                // stored as an ISBN-13, without hyphens
+                isbn: "9782070612758".into(),
             }
         );
     }
 
     #[test]
-    fn same_books_ignores_case_accents_and_punctuation() {
+    fn isbn_is_required_valid_and_kept_as_isbn_13() {
         let mut lib = Library::new();
-        let mut input = book("L’Œil du loup");
-        input.author = "Daniel Pennac".into();
-        let ids = lib.add_copies(input, 2).unwrap();
-        let mut probe = book("l'oeil  du LOUP !");
-        probe.author = "daniel pennac".into();
-        assert_eq!(lib.same_books(&probe), ids);
-        // no author given: the title is enough
-        assert_eq!(lib.same_books(&book("L'œil du loup")), ids);
-        // another author: another book
-        probe.author = "Quelqu'un d'autre".into();
-        assert!(lib.same_books(&probe).is_empty());
-        assert!(lib.same_books(&book("L'Œil du lynx")).is_empty());
+        let mut input = book("Matilda");
+        input.isbn = "  ".into();
+        assert_eq!(lib.add_book(input.clone()), Err(Error::IsbnRequired));
+        input.isbn = "9782070612759".into();
+        assert!(matches!(
+            lib.add_book(input.clone()),
+            Err(Error::InvalidIsbn(_))
+        ));
+        input.isbn = "abc".into();
+        assert!(matches!(lib.add_book(input.clone()), Err(Error::InvalidIsbn(_))));
+        // an ISBN-10 with hyphens is kept as the ISBN-13 of the same book
+        input.isbn = "2-07-061275-9".into();
+        let id = lib.add_book(input).unwrap();
+        assert_eq!(lib.book(id).unwrap().isbn, "9782070612758");
+        assert!(lib.books().len() == 1);
     }
 
     #[test]
-    fn same_books_matches_isbn_whatever_the_title() {
+    fn copies_share_their_isbn_and_are_found_by_it_in_any_form() {
+        let mut lib = Library::new();
+        let ids = lib.add_copies(book("L’Œil du loup"), 3).unwrap();
+        let other = lib.add_book(book("L’Œil du lynx")).unwrap();
+        let isbn = crate::isbn::test_isbn("L’Œil du loup");
+        assert_eq!(lib.copies_of(&isbn), ids);
+        assert_eq!(lib.same_books(&book("L’Œil du loup")), ids);
+        // another ISBN is another book, even with the same title
+        let mut edition = book("L’Œil du loup");
+        edition.isbn = crate::isbn::test_isbn("autre édition");
+        assert!(lib.same_books(&edition).is_empty());
+        assert_eq!(lib.copies_of(&crate::isbn::test_isbn("L’Œil du lynx")), vec![other]);
+        // not an ISBN, or unknown: no copies
+        assert!(lib.copies_of("L000001").is_empty());
+        assert!(lib.copies_of(&crate::isbn::test_isbn("inconnu")).is_empty());
+    }
+
+    #[test]
+    fn a_free_copy_is_found_among_the_copies() {
+        let mut lib = Library::new();
+        let ids = lib.add_copies(book("Matilda"), 2).unwrap();
+        let isbn = crate::isbn::test_isbn("Matilda");
+        let s = lib.add_student("Martin", "Léa", BIRTH, REG).unwrap();
+        assert_eq!(lib.free_copy_of(&isbn), Some(ids[0]));
+        lib.lend(ids[0], s, d(2026, 10, 1)).unwrap();
+        assert_eq!(lib.free_copy_of(&isbn), Some(ids[1]));
+        assert_eq!(lib.open_loans_for_isbn(&isbn).len(), 1);
+        lib.lend(ids[1], s, d(2026, 10, 1)).unwrap();
+        assert_eq!(lib.free_copy_of(&isbn), None);
+        assert_eq!(lib.open_loans_for_isbn(&isbn).len(), 2);
+    }
+
+    #[test]
+    fn a_book_registered_before_the_isbn_was_required_can_be_given_one() {
+        let json = r#"{"version":1,"books":[{"id":1,"title":"X"}]}"#;
+        let mut lib: Library = serde_json::from_str(json).unwrap();
+        lib.after_load().unwrap();
+        // the old file still loads, the book just has no ISBN yet
+        assert_eq!(lib.book(1).unwrap().isbn, "");
+        assert!(lib.copies_of("").is_empty());
+        assert_eq!(lib.set_book_isbn(1, " "), Err(Error::IsbnRequired));
+        assert!(matches!(
+            lib.set_book_isbn(1, "123"),
+            Err(Error::InvalidIsbn(_))
+        ));
+        lib.set_book_isbn(1, "978-2-07-061275-8").unwrap();
+        assert_eq!(lib.book(1).unwrap().isbn, "9782070612758");
+        assert_eq!(lib.copies_of("9782070612758"), vec![1]);
+        assert_eq!(lib.set_book_isbn(9, "9782070612758"), Err(Error::BookNotFound(9)));
+    }
+
+    #[test]
+    fn same_books_matches_the_isbn_in_any_written_form() {
         let mut lib = Library::new();
         let mut input = book("Matilda");
         input.isbn = "978-2-07-061275-8".into();
         let id = lib.add_book(input).unwrap();
+        // another title, same ISBN: the same book
         let mut probe = book("Matilda (poche)");
         probe.isbn = "9782070612758".into();
+        assert_eq!(lib.same_books(&probe), vec![id]);
+        probe.isbn = "2070612759".into();
         assert_eq!(lib.same_books(&probe), vec![id]);
     }
 
@@ -1275,7 +1359,8 @@ mod tests {
     fn same_books_skips_archived_and_empty_input() {
         let mut lib = Library::new();
         let id = lib.add_book(book("Tintin")).unwrap();
-        assert!(lib.same_books(&book("   ")).is_empty());
+        assert!(lib.same_books(&BookInput::default()).is_empty());
+        assert_eq!(lib.same_books(&book("Tintin")), vec![id]);
         lib.archive_book(id).unwrap();
         assert!(lib.same_books(&book("Tintin")).is_empty());
     }

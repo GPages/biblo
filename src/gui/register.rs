@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use biblo::codes::{book_code, student_code, Kind};
+use biblo::codes::student_code;
 use biblo::dates::{format_date, parse_date, parse_year};
 use biblo::search::{fold, Query};
 use biblo::{BookInput, Library, Store};
@@ -52,7 +52,8 @@ pub struct RegisterView {
     filled_title: String,
     filled_collection: String,
 
-    book_labels: PrintQueue,
+    /// Books registered in this session, newest first: (title, ISBN, copies).
+    recent_books: Vec<(String, String, usize)>,
 
     // New pupil form.
     last_name: String,
@@ -82,14 +83,14 @@ impl Default for RegisterView {
             isbn_message: None,
             filled_title: String::new(),
             filled_collection: String::new(),
-            book_labels: PrintQueue::new(Kind::Book),
+            recent_books: Vec::new(),
             last_name: String::new(),
             first_name: String::new(),
             birth_date: String::new(),
             class: String::new(),
             student_message: None,
             student_query: String::new(),
-            student_cards: PrintQueue::new(Kind::Student),
+            student_cards: PrintQueue::new(),
         }
     }
 }
@@ -121,8 +122,8 @@ impl RegisterView {
                 scroll_column(&mut cols[0], "book_form_column", |ui| {
                     theme::card(ui, |ui| self.book_form(ui, store, isbn));
                 });
-                scroll_column(&mut cols[1], "book_labels_column", |ui| {
-                    theme::card(ui, |ui| self.book_labels.ui(ui, store.lib(), data_dir));
+                scroll_column(&mut cols[1], "recent_books_column", |ui| {
+                    theme::card(ui, |ui| self.recent_books_card(ui));
                 });
             }),
             Section::Students => ui.columns(2, |cols| {
@@ -150,7 +151,7 @@ impl RegisterView {
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 // Top-aligned: the message under the field makes this row taller.
-                ui.with_layout(Layout::top_down(Align::Min), |ui| ui.label("ISBN"));
+                ui.with_layout(Layout::top_down(Align::Min), |ui| ui.label("ISBN *"));
                 self.isbn_field(ui, isbn);
                 ui.end_row();
                 ui.label("Titre *");
@@ -204,7 +205,10 @@ impl RegisterView {
                 ui.add(egui::DragValue::new(&mut self.copies).range(1..=100));
                 ui.end_row();
             });
-        ui.weak("* obligatoire. Chaque exemplaire reçoit son propre code-barres.");
+        ui.weak(
+            "* obligatoire. L'ISBN est le code-barres imprimé sur le livre : c'est lui qu'on \
+             scanne pour les prêts. Les exemplaires d'un même livre ont le même ISBN.",
+        );
         ui.add_space(6.0);
 
         // Warn as soon as the book looks already registered.
@@ -215,83 +219,87 @@ impl RegisterView {
             ..Default::default()
         };
         let lib = store.lib();
-        // (id, description, on loan)
-        let same: Vec<(u32, String, bool)> = lib
-            .same_books(&probe)
-            .into_iter()
-            .filter_map(|id| {
-                let b = lib.book(id)?;
-                let mut text = b.title.clone();
-                if !b.author.is_empty() {
-                    text.push_str(&format!(" — {}", b.author));
-                }
-                Some((id, text, lib.open_loan_for_book(id).is_some()))
-            })
-            .collect();
+        let same = lib.same_books(&probe);
+        // The copies of this book already registered: (title, author, copies, out).
+        let existing = same.first().and_then(|&id| lib.book(id)).map(|b| {
+            let out = same
+                .iter()
+                .filter(|&&id| lib.open_loan_for_book(id).is_some())
+                .count();
+            (b.title.clone(), b.author.clone(), same.len(), out)
+        });
 
-        if same.is_empty() {
-            if ui
-                .add(theme::main_button("Enregistrer le livre", theme::GREEN))
-                .clicked()
-            {
-                self.book_message = Some(self.save_book(store, None));
+        match existing {
+            None => {
+                if ui
+                    .add(theme::main_button("Enregistrer le livre", theme::GREEN))
+                    .clicked()
+                {
+                    self.book_message = Some(self.save_book(store, None));
+                }
             }
-        } else {
-            // A message about an earlier action would be confusing next to the warning.
-            self.book_message = None;
-            let (mut reprint, mut save_anyway) = (None, false);
-            egui::Frame::new()
-                .fill(theme::ON_LOAN.0)
-                .corner_radius(12)
-                .inner_margin(Margin::same(12))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("⚠ Ce livre est déjà enregistré :")
-                            .family(theme::bold())
-                            .color(theme::ON_LOAN.1),
-                    );
-                    for (id, text, on_loan) in &same {
-                        ui.horizontal(|ui| {
-                            ui.monospace(book_code(*id));
-                            if ui.small_button("Réimprimer l'étiquette").clicked() {
-                                reprint = Some(*id);
-                            }
-                            if *on_loan {
-                                theme::badge(ui, "prêté", theme::ON_LOAN);
-                            }
-                            // Shortened to the card width; the full text shows on hover.
-                            ui.add(egui::Label::new(text.as_str()).truncate());
-                        });
-                    }
-                    ui.add_space(4.0);
-                    ui.label(
-                        "Un autre exemplaire du même livre a besoin de son propre code-barres :",
-                    );
-                    if ui
-                        .add(theme::main_button(
-                            "Enregistrer quand même (nouvel exemplaire)",
-                            theme::ON_LOAN.1,
-                        ))
-                        .clicked()
-                    {
-                        save_anyway = true;
-                    }
-                });
-            if let Some(id) = reprint {
-                self.book_labels.push([id]);
-                self.clear_book_form();
-                self.book_message = Some(Message::Ok(format!(
-                    "{} ajouté aux étiquettes à imprimer (même code-barres).",
-                    book_code(id)
-                )));
-            }
-            if save_anyway {
-                let first = same.first().map(|(id, _, _)| *id);
-                self.book_message = Some(self.save_book(store, first));
+            Some((title, author, copies, out)) => {
+                // A message about an earlier action would be confusing next to the warning.
+                self.book_message = None;
+                let mut save_anyway = false;
+                egui::Frame::new()
+                    .fill(theme::ON_LOAN.0)
+                    .corner_radius(12)
+                    .inner_margin(Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("⚠ Ce livre (même ISBN) est déjà enregistré :")
+                                .family(theme::bold())
+                                .color(theme::ON_LOAN.1),
+                        );
+                        let mut text = title;
+                        if !author.is_empty() {
+                            text.push_str(&format!(" — {author}"));
+                        }
+                        ui.add(egui::Label::new(text).truncate());
+                        ui.label(format!(
+                            "{copies} exemplaire(s) enregistré(s), dont {out} prêté(s).",
+                        ));
+                        ui.add_space(4.0);
+                        ui.label("Pour ajouter un exemplaire de plus du même livre :");
+                        save_anyway = ui
+                            .add(theme::main_button(
+                                "Enregistrer quand même (nouvel exemplaire)",
+                                theme::ON_LOAN.1,
+                            ))
+                            .clicked();
+                    });
+                if save_anyway {
+                    let first = same.first().copied();
+                    self.book_message = Some(self.save_book(store, first));
+                }
             }
         }
         if let Some(m) = &self.book_message {
             m.show(ui);
+        }
+    }
+
+    /// The books registered since the app was started, so that the teacher
+    /// can see what was added.
+    fn recent_books_card(&self, ui: &mut egui::Ui) {
+        ui.heading(format!(
+            "🆕 Livres enregistrés ({})",
+            self.recent_books.len()
+        ));
+        ui.add_space(4.0);
+        if self.recent_books.is_empty() {
+            ui.label("Les livres que vous enregistrez apparaissent ici.");
+            return;
+        }
+        for (title, isbn, copies) in &self.recent_books {
+            ui.horizontal(|ui| {
+                ui.monospace(isbn);
+                if *copies > 1 {
+                    theme::badge(ui, &format!("{copies} exemplaires"), theme::INFO);
+                }
+                ui.add(egui::Label::new(title).truncate());
+            });
         }
     }
 
@@ -499,16 +507,20 @@ impl RegisterView {
         match store.apply(|lib| lib.add_copies(input, self.copies)) {
             Err(e) => Message::Err(e.to_string()),
             Ok(ids) => {
-                self.book_labels.push(ids.iter().copied());
+                let saved = store
+                    .lib()
+                    .book(ids[0])
+                    .map(|b| (b.title.clone(), b.isbn.clone()));
                 self.clear_book_form();
-                match ids.as_slice() {
-                    [id] => Message::Ok(format!("Livre enregistré : {}.", book_code(*id))),
-                    _ => Message::Ok(format!(
-                        "{} exemplaires enregistrés : {} à {}.",
-                        ids.len(),
-                        book_code(ids[0]),
-                        book_code(ids[ids.len() - 1])
-                    )),
+                let Some((title, isbn)) = saved else {
+                    return Message::Ok("Livre enregistré.".into());
+                };
+                self.recent_books
+                    .insert(0, (title.clone(), isbn, ids.len()));
+                self.recent_books.truncate(30);
+                match ids.len() {
+                    1 => Message::Ok(format!("Livre enregistré : « {title} ».")),
+                    n => Message::Ok(format!("{n} exemplaires enregistrés : « {title} ».")),
                 }
             }
         }

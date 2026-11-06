@@ -343,6 +343,7 @@ mod tests {
     fn book(title: &str) -> BookInput {
         BookInput {
             title: title.to_string(),
+            isbn: crate::isbn::test_isbn(title),
             ..Default::default()
         }
     }
