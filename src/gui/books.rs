@@ -2,13 +2,13 @@
 //! note on each copy (damaged, to repair…).
 
 use biblo::codes::book_code;
-use biblo::dates::format_date;
+use biblo::dates::{format_date, parse_year};
 use biblo::search::{fold, Query};
-use biblo::{Book, Store};
+use biblo::{Book, BookInput, Store};
 use eframe::egui::{self, Align, Layout, Margin, RichText};
 use egui_extras::{Column, TableBuilder};
 
-use super::{theme, Message};
+use super::{text_with_choices, theme, Message};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Status {
@@ -25,12 +25,46 @@ struct NoteForm {
     focus: bool,
 }
 
+/// A book's details being edited.
+struct EditForm {
+    id: u32,
+    title: String,
+    author: String,
+    collection: String,
+    category: String,
+    year: String,
+    isbn: String,
+    error: Option<String>,
+}
+
+impl EditForm {
+    fn new(book: &Book) -> EditForm {
+        EditForm {
+            id: book.id,
+            title: book.title.clone(),
+            author: book.author.clone(),
+            collection: book.collection.clone(),
+            category: book.category.clone(),
+            year: book.year.map(|y| y.to_string()).unwrap_or_default(),
+            isbn: book.isbn.clone(),
+            error: None,
+        }
+    }
+}
+
+/// What the user clicked on in a row of the list.
+enum RowAction {
+    Note(u32),
+    Edit(u32),
+}
+
 #[derive(Default)]
 pub struct BooksView {
     query: String,
     status: Status,
     only_notes: bool,
     note_form: Option<NoteForm>,
+    edit_form: Option<EditForm>,
     message: Option<Message>,
 }
 
@@ -68,6 +102,7 @@ impl BooksView {
                 m.show(ui);
             }
             self.note_box(ui, store);
+            self.edit_box(ui, store);
         });
 
         let lib = store.lib();
@@ -121,7 +156,7 @@ impl BooksView {
         });
         ui.add_space(4.0);
 
-        let mut edit_note = None;
+        let mut action = None;
         theme::card(ui, |ui| {
             if total == 0 {
                 ui.label(
@@ -130,16 +165,29 @@ impl BooksView {
             } else if rows.is_empty() {
                 ui.label("🔍 Aucun livre ne correspond.");
             } else {
-                edit_note = book_table(ui, &rows);
+                action = book_table(ui, &rows);
             }
         });
-        if let Some(book) = edit_note.and_then(|id| lib.book(id)) {
-            self.note_form = Some(NoteForm {
-                book: book.id,
-                text: book.note.clone(),
-                focus: true,
-            });
-            self.message = None;
+        match action {
+            Some(RowAction::Note(id)) => {
+                if let Some(book) = lib.book(id) {
+                    self.note_form = Some(NoteForm {
+                        book: book.id,
+                        text: book.note.clone(),
+                        focus: true,
+                    });
+                    self.edit_form = None;
+                    self.message = None;
+                }
+            }
+            Some(RowAction::Edit(id)) => {
+                if let Some(book) = lib.book(id) {
+                    self.edit_form = Some(EditForm::new(book));
+                    self.note_form = None;
+                    self.message = None;
+                }
+            }
+            None => {}
         }
     }
 
@@ -199,6 +247,96 @@ impl BooksView {
             self.note_form = None;
         }
     }
+
+    /// Form to change the details of the book chosen in the list.
+    fn edit_box(&mut self, ui: &mut egui::Ui, store: &mut Store) {
+        let Some(form) = &mut self.edit_form else {
+            return;
+        };
+        let Some(book) = store.lib().book(form.id) else {
+            self.edit_form = None;
+            return;
+        };
+        let what = format!("« {} » ({})", book.title, book_code(book.id));
+        let old_title = book.title.clone();
+        let categories = store.lib().categories();
+        let (mut save, mut cancel) = (false, false);
+        egui::Frame::new()
+            .fill(theme::INFO.0)
+            .corner_radius(12)
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(format!("✏ Fiche de {what}"))
+                        .family(theme::bold())
+                        .color(theme::INFO.1),
+                );
+                egui::Grid::new("edit_book")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Titre *");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.title).desired_width(320.0),
+                        );
+                        ui.end_row();
+                        ui.label("Auteur");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.author).desired_width(320.0),
+                        );
+                        ui.end_row();
+                        ui.label("Collection");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.collection)
+                                .desired_width(320.0),
+                        );
+                        ui.end_row();
+                        ui.label("Catégorie");
+                        text_with_choices(
+                            ui,
+                            "edit_book_category_pick",
+                            &mut form.category,
+                            "Roman, BD, Album…",
+                            categories,
+                        );
+                        ui.end_row();
+                        ui.label("Année de parution");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.year)
+                                .hint_text("aaaa")
+                                .desired_width(60.0),
+                        );
+                        ui.end_row();
+                        ui.label("ISBN");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.isbn).desired_width(220.0),
+                        );
+                        ui.end_row();
+                    });
+                ui.weak("* obligatoire. Le code-barres et la note de l'exemplaire ne changent pas.");
+                ui.horizontal(|ui| {
+                    save = ui
+                        .add(theme::main_button("Enregistrer", theme::GREEN))
+                        .clicked();
+                    cancel = ui.button("Annuler").clicked();
+                });
+                if let Some(error) = &form.error {
+                    ui.colored_label(theme::RED, format!("⚠ {error}"));
+                }
+            });
+        if save {
+            match save_edit(store, form, &old_title) {
+                Ok(text) => {
+                    self.message = Some(Message::Ok(text));
+                    self.edit_form = None;
+                }
+                Err(error) => form.error = Some(error),
+            }
+        } else if cancel {
+            self.edit_form = None;
+        }
+    }
 }
 
 /// The note on one line, for the list.
@@ -206,9 +344,9 @@ fn one_line(note: &str) -> String {
     note.lines().collect::<Vec<_>>().join(" · ")
 }
 
-/// Returns the book whose 📝 button was clicked.
-fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
-    let mut edit_note = None;
+/// What was clicked on in a row of the list.
+fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<RowAction> {
+    let mut action = None;
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
@@ -247,14 +385,23 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
             body.heterogeneous_rows(heights, |mut table_row| {
                 let (_, row) = &rows[table_row.index()];
                 table_row.col(|ui| {
-                    let hint = if row.book.note.is_empty() {
-                        "Ajouter une note (abîmé, à réparer…)"
-                    } else {
-                        "Modifier ou supprimer la note"
-                    };
-                    if ui.small_button("📝").on_hover_text(hint).clicked() {
-                        edit_note = Some(row.book.id);
-                    }
+                    ui.horizontal(|ui| {
+                        let hint = if row.book.note.is_empty() {
+                            "Ajouter une note (abîmé, à réparer…)"
+                        } else {
+                            "Modifier ou supprimer la note"
+                        };
+                        if ui.small_button("📝").on_hover_text(hint).clicked() {
+                            action = Some(RowAction::Note(row.book.id));
+                        }
+                        if ui
+                            .small_button("✏")
+                            .on_hover_text("Modifier la fiche (titre, auteur, collection…)")
+                            .clicked()
+                        {
+                            action = Some(RowAction::Edit(row.book.id));
+                        }
+                    });
                 });
                 table_row.col(|ui| {
                     ui.monospace(&row.code);
@@ -298,5 +445,155 @@ fn book_table(ui: &mut egui::Ui, rows: &[(String, Row)]) -> Option<u32> {
                 });
             });
         });
-    edit_note
+    action
+}
+
+/// Saves the edited details; returns the message to show, or the error.
+fn save_edit(store: &mut Store, form: &EditForm, old_title: &str) -> Result<String, String> {
+    let year = if form.year.trim().is_empty() {
+        None
+    } else {
+        match parse_year(&form.year) {
+            Some(y) => Some(y),
+            None => {
+                return Err("Année de parution invalide : 4 chiffres, par exemple 2019.".into())
+            }
+        }
+    };
+    let input = BookInput {
+        title: form.title.clone(),
+        author: form.author.clone(),
+        collection: form.collection.clone(),
+        category: form.category.clone(),
+        year,
+        isbn: form.isbn.clone(),
+    };
+    store
+        .apply(|lib| lib.update_book(form.id, &input))
+        .map_err(|e| e.to_string())?;
+    let book = store.lib().book(form.id);
+    let mut text = match book {
+        Some(b) => format!("Fiche enregistrée : « {} » ({}).", b.title, book_code(b.id)),
+        None => "Fiche enregistrée.".to_string(),
+    };
+    // The label shows the title next to the barcode.
+    if book.is_some_and(|b| b.title != old_title) {
+        text.push_str(
+            " Le code-barres ne change pas ; pour que l'étiquette affiche le nouveau titre, \
+             réimprimez-la depuis l'onglet Enregistrer.",
+        );
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Temporary folder, removed at the end of the test.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> TempDir {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let p = std::env::temp_dir().join(format!(
+                "biblo-gui-test-{}-{}-{}",
+                std::process::id(),
+                n,
+                nanos
+            ));
+            fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// A store holding one book, "Matilda" by Roald Dahl, with a note.
+    fn store_with_book() -> (TempDir, Store, u32) {
+        let t = TempDir::new();
+        let mut store = Store::open(t.0.join("data"), d(2026, 10, 10)).unwrap();
+        let id = store
+            .apply(|lib| {
+                lib.add_book(BookInput {
+                    title: "Matilda".into(),
+                    author: "Roald Dahl".into(),
+                    year: Some(1988),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        store.apply(|lib| lib.set_book_note(id, "Couverture abîmée")).unwrap();
+        (t, store, id)
+    }
+
+    #[test]
+    fn save_edit_updates_author_and_keeps_note_and_code() {
+        let (_t, mut store, id) = store_with_book();
+        let mut form = EditForm::new(store.lib().book(id).unwrap());
+        form.author = "  R.   Dahl ".into();
+        let msg = save_edit(&mut store, &form, "Matilda").unwrap();
+        let book = store.lib().book(id).unwrap();
+        assert_eq!(book.author, "R. Dahl");
+        // the per-copy note and the id (hence the barcode) are untouched
+        assert_eq!(book.note, "Couverture abîmée");
+        assert_eq!(book.id, id);
+        assert_eq!(book.year, Some(1988));
+        assert!(msg.contains("Fiche enregistrée"));
+        assert!(!msg.contains("réimprimez"));
+    }
+
+    #[test]
+    fn save_edit_mentions_reprint_only_when_the_title_changes() {
+        let (_t, mut store, id) = store_with_book();
+        let mut form = EditForm::new(store.lib().book(id).unwrap());
+        form.title = "Matilda (poche)".into();
+        let msg = save_edit(&mut store, &form, "Matilda").unwrap();
+        assert!(msg.contains("réimprimez"));
+        assert_eq!(store.lib().book(id).unwrap().title, "Matilda (poche)");
+    }
+
+    #[test]
+    fn save_edit_rejects_bad_year_and_empty_title_without_changing_anything() {
+        let (_t, mut store, id) = store_with_book();
+        let mut form = EditForm::new(store.lib().book(id).unwrap());
+        form.year = "19".into();
+        let err = save_edit(&mut store, &form, "Matilda").unwrap_err();
+        assert!(err.contains("Année de parution invalide"));
+        assert_eq!(store.lib().book(id).unwrap().year, Some(1988));
+
+        form.year = "1990".into();
+        form.title = "   ".into();
+        let err = save_edit(&mut store, &form, "Matilda").unwrap_err();
+        assert!(err.contains("titre est obligatoire"));
+        let book = store.lib().book(id).unwrap();
+        assert_eq!(book.title, "Matilda");
+        assert_eq!(book.year, Some(1988));
+
+        // a valid year goes through, an empty one clears it
+        form.title = "Matilda".into();
+        save_edit(&mut store, &form, "Matilda").unwrap();
+        assert_eq!(store.lib().book(id).unwrap().year, Some(1990));
+        form.year = " ".into();
+        save_edit(&mut store, &form, "Matilda").unwrap();
+        assert_eq!(store.lib().book(id).unwrap().year, None);
+    }
 }
