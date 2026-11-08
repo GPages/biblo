@@ -1,6 +1,6 @@
 [package]
 name = "biblo"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Gestion de bibliothèque scolaire hors-ligne : livres, élèves, prêts, code-barres"
 license = "0BSD"
